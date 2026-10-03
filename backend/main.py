@@ -426,6 +426,14 @@ def health():
     return db.health_summary()
 
 
+@app.get("/api/notify/test")
+def notify_test():
+    """Fires one real test push and reports exactly what happened —
+    open this URL in a browser to troubleshoot why notifications aren't
+    arriving, instead of guessing."""
+    return notify.test()
+
+
 @app.get("/api/digest")
 def digest(date: Optional[str] = Query(None)):
     """Factual, server-computed figures for a single day (default:
