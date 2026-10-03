@@ -18,6 +18,7 @@ from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import database as db
@@ -345,6 +346,56 @@ async def ai_resolve(body: AiResolveBody, x_owner_password: Optional[str] = Head
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI Assistant error: {e}")
     return _ai_result(result)
+
+
+# ---------------------------------------------------------------------------
+# Backups (owner-only) — manual "Backup now" button plus a lazy monthly
+# auto-backup that fires the next time the owner opens the app after 30+
+# days, since Render's free tier can't be trusted to run a background timer
+# while asleep. Backups are stored as rows in Postgres itself, so they
+# survive restarts/redeploys with no extra infrastructure.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/backups")
+def backups_list(x_owner_password: Optional[str] = Header(None)):
+    require_owner(x_owner_password)
+    return {"backups": db.list_backups(), "lastBackupAt": db.last_backup_at()}
+
+
+@app.post("/api/backups")
+def backups_create(x_owner_password: Optional[str] = Header(None)):
+    """Manual 'Backup now' button."""
+    require_owner(x_owner_password)
+    return db.create_backup(kind="manual")
+
+
+@app.post("/api/backups/check")
+def backups_check(x_owner_password: Optional[str] = Header(None)):
+    """Called once when the owner opens the app. Silently creates an 'auto'
+    backup if the last one is 30+ days old (or none exists yet)."""
+    require_owner(x_owner_password)
+    created = db.maybe_auto_backup(min_days=30)
+    return {"created": created, "lastBackupAt": db.last_backup_at()}
+
+
+@app.get("/api/backups/{backup_id}/download")
+def backups_download(backup_id: int, x_owner_password: Optional[str] = Header(None)):
+    require_owner(x_owner_password)
+    backup = db.get_backup(backup_id)
+    if backup is None:
+        raise HTTPException(status_code=404, detail="Backup not found")
+    filename = f"pump-readings-backup-{backup['createdAt'][:10]}.json"
+    return JSONResponse(
+        content=backup["data"],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.delete("/api/backups/{backup_id}")
+def backups_delete(backup_id: int, x_owner_password: Optional[str] = Header(None)):
+    require_owner(x_owner_password)
+    db.delete_backup(backup_id)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

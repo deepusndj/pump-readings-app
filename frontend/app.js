@@ -1509,11 +1509,127 @@ function renderSummaryTab() {
       <div class="briefing-body" id="briefingBody"></div>
       <button class="briefing-refresh" id="briefingRefreshBtn">Refresh briefing</button>
     </div>
-    <div id="summaryQuickBody"><div class="loading">Loading…</div></div>`;
+    <div id="summaryQuickBody"><div class="loading">Loading…</div></div>
+    <div class="backup-card">
+      <div class="briefing-head">
+        <h3>Backups</h3>
+        <span class="briefing-when" id="backupLastWhen"></span>
+      </div>
+      <div class="backup-note">A backup is taken automatically about once a month, the next time you open the app. You can also back up on demand.</div>
+      <button class="briefing-refresh" id="backupNowBtn">Backup now</button>
+      <div id="backupList"><div class="loading">Loading…</div></div>
+    </div>`;
 
   document.getElementById('briefingRefreshBtn').addEventListener('click', () => generateBriefing(true));
   generateBriefing(false);
   drawSummaryQuickFigures();
+
+  document.getElementById('backupNowBtn').addEventListener('click', onBackupNowClick);
+  loadBackups();
+}
+
+// ---------------------------------------------------------------------------
+// Backups (owner only): manual "Backup now" button + list of stored
+// snapshots (each downloadable as JSON). A lazy monthly auto-backup is
+// triggered once per owner session via checkAutoBackup(), called from
+// enterApp() rather than here, so it fires regardless of which tab is open.
+// ---------------------------------------------------------------------------
+
+async function checkAutoBackup() {
+  try {
+    const result = await api('POST', '/backups/check', {}, true);
+    // If the summary tab happened to already be rendered (it's the owner's
+    // landing tab), refresh it so a freshly-made auto backup shows up
+    // without the owner needing to navigate away and back.
+    if (result && result.created && document.getElementById('backupList')) {
+      loadBackups();
+    }
+  } catch (e) { /* silent — not critical */ }
+}
+
+async function loadBackups() {
+  const listEl = document.getElementById('backupList');
+  const whenEl = document.getElementById('backupLastWhen');
+  if (!listEl) return;
+  try {
+    const result = await api('GET', '/backups', undefined, true);
+    if (whenEl) whenEl.textContent = result.lastBackupAt ? 'Last backup ' + timeAgo(result.lastBackupAt) : 'No backups yet';
+    if (!result.backups.length) {
+      listEl.innerHTML = '<div class="empty-state">No backups yet — click "Backup now" to create the first one.</div>';
+      return;
+    }
+    listEl.innerHTML = result.backups.map(b => `
+      <div class="backup-row" data-id="${b.id}">
+        <div class="backup-row-main">
+          <span class="backup-kind ${b.kind}">${b.kind === 'auto' ? 'Auto' : 'Manual'}</span>
+          <span class="backup-date">${new Date(b.createdAt).toLocaleString()}</span>
+          <span class="backup-size">${(b.sizeBytes / 1024).toFixed(1)} KB</span>
+        </div>
+        <div class="backup-row-actions">
+          <button class="pill-btn" data-dl="${b.id}">Download</button>
+          <button class="pill-btn danger" data-del="${b.id}">Delete</button>
+        </div>
+      </div>`).join('');
+    listEl.querySelectorAll('[data-dl]').forEach(btn =>
+      btn.addEventListener('click', () => downloadBackup(btn.getAttribute('data-dl'))));
+    listEl.querySelectorAll('[data-del]').forEach(btn =>
+      btn.addEventListener('click', () => onDeleteBackupClick(btn.getAttribute('data-del'))));
+  } catch (e) {
+    listEl.innerHTML = '<div class="empty-state">Couldn\'t load backups.</div>';
+  }
+}
+
+async function onBackupNowClick() {
+  const btn = document.getElementById('backupNowBtn');
+  btn.disabled = true;
+  btn.textContent = 'Backing up…';
+  try {
+    await api('POST', '/backups', {}, true);
+    showFcToast('Backup created');
+    await loadBackups();
+  } catch (e) {
+    showFcToast(e.message || 'Backup failed');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Backup now';
+  }
+}
+
+async function downloadBackup(id) {
+  try {
+    const res = await fetch('/api/backups/' + id + '/download', { headers: ownerHeaders() });
+    if (!res.ok) throw new Error('Download failed (' + res.status + ')');
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : ('pump-readings-backup-' + id + '.json');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showFcToast(e.message || 'Download failed');
+  }
+}
+
+function onDeleteBackupClick(id) {
+  openConfirmModal({
+    title: 'Delete this backup?',
+    body: 'This removes the stored snapshot. This can\'t be undone.',
+    confirmLabel: 'Delete',
+    onConfirm: async () => {
+      try {
+        await api('DELETE', '/backups/' + id, undefined, true);
+        await loadBackups();
+      } catch (e) {
+        showFcToast(e.message || 'Delete failed');
+      }
+    },
+  });
 }
 
 async function drawSummaryQuickFigures() {
@@ -1845,6 +1961,7 @@ function enterApp(role) {
   bindTabClicks();
   switchTab(role === 'owner' ? 'summary' : 'entry');
   renderEntryForDate(state.date);
+  if (role === 'owner') checkAutoBackup();
 }
 
 function switchRole() {

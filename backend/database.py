@@ -113,6 +113,15 @@ def init_db():
                 value_json TEXT NOT NULL
             )
         """)
+        pk_type = "SERIAL PRIMARY KEY" if IS_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS backups (
+                id {pk_type},
+                created_at TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                data_json TEXT NOT NULL
+            )
+        """)
         # Seed default rates/targets if not present yet.
         cur.execute(q("SELECT key FROM settings WHERE key = ?"), ("rates",))
         if cur.fetchone() is None:
@@ -342,3 +351,83 @@ def set_setting(key, value):
             INSERT INTO settings (key, value_json) VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json
         """, (key, json.dumps(value)))
+
+
+# ---------- backups ----------
+
+def build_full_snapshot():
+    """Gather every table into one plain-dict snapshot, used for both
+    manual and automatic backups."""
+    return {
+        "exportedAt": datetime.datetime.utcnow().isoformat() + "Z",
+        "readings": list_readings(limit=1000000),
+        "costs": list_costs(limit=1000000),
+        "stock": list_stock(limit=1000000),
+        "settings": {
+            "rates": get_setting("rates", DEFAULT_RATES),
+            "targets": get_setting("targets", DEFAULT_TARGETS),
+        },
+    }
+
+
+def create_backup(kind="manual"):
+    """Snapshot all data and store it as a new backup row. `kind` is
+    'manual' or 'auto'. Returns the backup's summary row."""
+    snapshot = build_full_snapshot()
+    created_at = datetime.datetime.utcnow().isoformat() + "Z"
+    data_json = json.dumps(snapshot)
+    with get_conn() as conn:
+        if IS_PG:
+            cur = conn.cursor()
+            cur.execute(q("INSERT INTO backups (created_at, kind, data_json) VALUES (?, ?, ?) RETURNING id"),
+                        (created_at, kind, data_json))
+            new_id = cur.fetchone()["id"]
+        else:
+            cur = conn.execute("INSERT INTO backups (created_at, kind, data_json) VALUES (?, ?, ?)",
+                                (created_at, kind, data_json))
+            new_id = cur.lastrowid
+    return {"id": new_id, "createdAt": created_at, "kind": kind, "sizeBytes": len(data_json)}
+
+
+def list_backups(limit=50):
+    with get_conn() as conn:
+        rows = _execute(conn, """
+            SELECT id, created_at, kind, LENGTH(data_json) AS size_bytes
+            FROM backups ORDER BY created_at DESC LIMIT ?
+        """, (limit,)).fetchall()
+        return [{"id": r["id"], "createdAt": r["created_at"], "kind": r["kind"], "sizeBytes": r["size_bytes"]}
+                for r in rows]
+
+
+def get_backup(backup_id):
+    with get_conn() as conn:
+        row = _execute(conn, "SELECT * FROM backups WHERE id = ?", (backup_id,)).fetchone()
+        if row is None:
+            return None
+        return {"id": row["id"], "createdAt": row["created_at"], "kind": row["kind"],
+                "data": json.loads(row["data_json"])}
+
+
+def delete_backup(backup_id):
+    with get_conn() as conn:
+        _execute(conn, "DELETE FROM backups WHERE id = ?", (backup_id,))
+
+
+def last_backup_at():
+    with get_conn() as conn:
+        row = _execute(conn, "SELECT created_at FROM backups ORDER BY created_at DESC LIMIT 1").fetchone()
+        return row["created_at"] if row else None
+
+
+def maybe_auto_backup(min_days=30):
+    """Create an 'auto' backup if the last backup (of any kind) is older
+    than `min_days`, or none exists yet. Cheap to call on every owner page
+    load — one SELECT when nothing is due. Returns the new backup summary
+    if one was created, else None."""
+    last = last_backup_at()
+    if last:
+        last_dt = datetime.datetime.fromisoformat(last.replace("Z", "+00:00"))
+        age_days = (datetime.datetime.now(datetime.timezone.utc) - last_dt).days
+        if age_days < min_days:
+            return None
+    return create_backup(kind="auto")
