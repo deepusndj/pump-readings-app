@@ -29,6 +29,7 @@ let state = {
   prevFinal: {},
   overrides: {},
   confirmedFlags: {},
+  fieldEdit: null,
   name: '',
 };
 
@@ -154,6 +155,7 @@ async function renderEntryForDate(dateStr) {
   state.prevFinal = prevFinal;
   state.overrides = {};
   state.confirmedFlags = {};
+  state.fieldEdit = null;
   state.pumps = {};
 
   PUMPS.forEach(p => {
@@ -172,9 +174,26 @@ async function renderEntryForDate(dateStr) {
   renderEntryBody();
 }
 
+function fieldLabel(field) {
+  return field === 'initial' ? 'Initial' : field === 'final' ? 'Final' : 'Test L';
+}
+
+// A field is "locked behind Edit" once the day is already saved. Initial is
+// owner-only; final/test can be opened by either role. Not-yet-saved days
+// behave exactly as before — free typing, no confirmation needed.
+function fieldPermission(field) {
+  const isSavedDay = !!state.existingDoc;
+  if (!isSavedDay) return { locked: false, editable: true, ownerOnly: false };
+  const ownerOnly = field === 'initial';
+  const editable = appRole === 'owner' || !ownerOnly;
+  const isEditingThis = state.fieldEdit && state.fieldEdit.field === field;
+  return { locked: editable && !isEditingThis, editable, ownerOnly, isEditingThis };
+}
+
 function renderEntryBody() {
   const body = document.getElementById('entryBody');
   let html = '';
+  const isSavedDay = !!state.existingDoc;
 
   ['petrol', 'diesel'].forEach(fuel => {
     html += `<div class="section-label ${fuel}"><span class="dot"></span>${fuel === 'petrol' ? 'Petrol' : 'Diesel'}</div>`;
@@ -184,33 +203,57 @@ function renderEntryBody() {
       const flagged = negative && !state.confirmedFlags[p.id];
       const unlocked = state.overrides[p.id];
 
+      const fieldHtml = (field, labelText, placeholder) => {
+        const perm = fieldPermission(field);
+        const isEditingThisField = state.fieldEdit && state.fieldEdit.pumpId === p.id && state.fieldEdit.field === field;
+        // Not-yet-saved day: original free-typing behaviour (initial still
+        // respects the reset "unlock" checkbox; final/test always free).
+        if (!isSavedDay) {
+          const readonlyAttr = (field === 'initial' && !unlocked) ? 'readonly' : '';
+          return `<div class="field">
+            <label>${labelText}</label>
+            <input type="text" inputmode="decimal" pattern="[0-9]*\\.?[0-9]*" ${readonlyAttr}
+              value="${v[field] === null || v[field] === undefined ? '' : v[field]}"
+              placeholder="${placeholder || ''}"
+              data-role="${field}" data-pump="${p.id}">
+          </div>`;
+        }
+        // Saved day: locked behind an explicit Edit, with a Clear option,
+        // both gated by fieldPermission() and both confirmed before applying.
+        const ownerLockIcon = perm.ownerOnly && appRole !== 'owner'
+          ? `<svg class="lock-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>` : '';
+        const readonlyAttr = (!perm.editable || !isEditingThisField) ? 'readonly' : '';
+        const inputClass = !perm.editable ? 'locked-field' : (isEditingThisField ? 'editing-field' : 'locked-field');
+        let actions = '';
+        if (perm.editable) {
+          actions = isEditingThisField
+            ? `<div class="field-actions">
+                 <button class="pill-btn save" data-act="fcApply" data-pump="${p.id}" data-field="${field}">✓ Save change</button>
+                 <button class="pill-btn cancel" data-act="fcCancelEdit" data-pump="${p.id}" data-field="${field}">Cancel</button>
+               </div>`
+            : `<div class="field-actions">
+                 <button class="pill-btn edit" data-act="fcEdit" data-pump="${p.id}" data-field="${field}">✎ Edit</button>
+                 <button class="pill-btn clear" data-act="fcClear" data-pump="${p.id}" data-field="${field}">🗑 Clear</button>
+               </div>`;
+        }
+        return `<div class="field">
+          <label>${labelText} ${ownerLockIcon}</label>
+          <input type="text" inputmode="decimal" pattern="[0-9]*\\.?[0-9]*" ${readonlyAttr} class="${inputClass}"
+            value="${v[field] === null || v[field] === undefined ? '' : v[field]}"
+            data-role="${field}" data-pump="${p.id}">
+          ${actions}
+        </div>`;
+      };
+
       html += `<div class="pump-card ${flagged ? 'flag' : ''}" data-pump="${p.id}">
         <div class="pump-head">
           <div class="pump-name">${p.label}</div>
           <div class="pump-litres ${flagged ? 'flag' : ''}">${litres === null ? 'enter reading' : (negative && state.confirmedFlags[p.id] ? 'reset — 0 L' : fmt(litres) + ' L')}</div>
         </div>
         <div class="field-grid">
-          <div class="field">
-            <label>Initial</label>
-            <input type="text" inputmode="decimal" pattern="[0-9]*\\.?[0-9]*"
-              ${unlocked ? '' : 'readonly'}
-              value="${v.initial === null || v.initial === undefined ? '' : v.initial}"
-              placeholder="${v.initial === null ? 'no history' : ''}"
-              data-role="initial" data-pump="${p.id}">
-          </div>
-          <div class="field">
-            <label>Final</label>
-            <input type="text" inputmode="decimal" pattern="[0-9]*\\.?[0-9]*"
-              value="${v.final === null || v.final === undefined ? '' : v.final}"
-              placeholder="today's reading"
-              data-role="final" data-pump="${p.id}">
-          </div>
-          <div class="field">
-            <label>Test L</label>
-            <input type="text" inputmode="decimal" pattern="[0-9]*\\.?[0-9]*"
-              value="${v.test === null || v.test === undefined ? '' : v.test}"
-              data-role="test" data-pump="${p.id}">
-          </div>
+          ${fieldHtml('initial', 'Initial', v.initial === null ? 'no history' : '')}
+          ${fieldHtml('final', 'Final', "today's reading")}
+          ${fieldHtml('test', 'Test L', '')}
         </div>
         ${flagged ? `
         <div class="flag-note">
@@ -221,6 +264,8 @@ function renderEntryBody() {
         <div class="flag-note" style="color:var(--text-dim);background:var(--surface-raised)">
           No previous reading found for this pump — enter its starting meter value.
         </div>` : '')}
+        ${isSavedDay && appRole !== 'owner' ? `
+        <div class="locked-note"><svg class="lock-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg> Initial reading is locked — ask the owner to change it if it's wrong.</div>` : ''}
       </div>`;
     });
   });
@@ -237,6 +282,14 @@ function renderEntryBody() {
     <input type="text" id="nameInput" placeholder="Staff name" value="${state.name || ''}">
   </div>`;
 
+  if (isSavedDay && appRole === 'owner') {
+    html += `<div class="danger-zone">
+      <h4>Delete this day's readings</h4>
+      <p>Permanently removes the saved reading for <b>${state.date}</b> for every pump. Employees cannot do this — only the owner.</p>
+      <button class="danger-btn" id="deleteDayBtn">Delete ${state.date} readings</button>
+    </div>`;
+  }
+
   body.innerHTML = html;
   attachEntryListeners();
   updateSaveButton(allFilled, anyUnresolvedFlag);
@@ -249,6 +302,123 @@ function attachEntryListeners() {
   });
   const nameInput = document.getElementById('nameInput');
   if (nameInput) nameInput.addEventListener('input', e => { state.name = e.target.value; });
+
+  document.querySelectorAll('#entryBody button[data-act]').forEach(btn => {
+    btn.addEventListener('click', onFieldEditAction);
+  });
+  const deleteBtn = document.getElementById('deleteDayBtn');
+  if (deleteBtn) deleteBtn.addEventListener('click', onDeleteDayClick);
+}
+
+// ---------- saved-reading edit / clear / delete-day ----------
+
+function onFieldEditAction(e) {
+  const act = e.currentTarget.dataset.act;
+  const pumpId = e.currentTarget.dataset.pump;
+  const field = e.currentTarget.dataset.field;
+
+  if (act === 'fcEdit') {
+    state.fieldEdit = { pumpId, field };
+    renderEntryBody();
+    const input = document.querySelector(`input[data-pump="${pumpId}"][data-role="${field}"]`);
+    if (input) { input.focus(); input.select(); }
+    return;
+  }
+
+  if (act === 'fcCancelEdit') {
+    const saved = state.existingDoc && state.existingDoc.pumps && state.existingDoc.pumps[pumpId];
+    state.pumps[pumpId][field] = saved ? saved[field] : state.pumps[pumpId][field];
+    state.fieldEdit = null;
+    renderEntryBody();
+    return;
+  }
+
+  if (act === 'fcApply') {
+    const input = document.querySelector(`input[data-pump="${pumpId}"][data-role="${field}"]`);
+    const raw = input.value;
+    const newVal = raw === '' ? null : parseFloat(raw);
+    if (raw !== '' && isNaN(newVal)) { input.focus(); return; }
+    const saved = state.existingDoc && state.existingDoc.pumps && state.existingDoc.pumps[pumpId];
+    const oldVal = saved ? saved[field] : state.pumps[pumpId][field];
+    const pumpLabel = (PUMPS.find(p => p.id === pumpId) || {}).label || pumpId;
+    openConfirmModal({
+      title: 'Confirm saved-reading change',
+      body: `You're about to change <b>${fieldLabel(field)}</b> for <b>${pumpLabel}</b> on <b>${state.date}</b> from <b>${fmt(oldVal)}</b> to <b>${newVal === null ? '—' : fmt(newVal)}</b>. This reading was already saved — please confirm.`,
+      confirmLabel: 'Confirm change',
+      neutral: true,
+      onConfirm: async () => {
+        state.pumps[pumpId][field] = newVal;
+        state.fieldEdit = null;
+        await saveReadings();
+        renderEntryBody();
+        showFcToast(`${pumpLabel} ${fieldLabel(field)} updated`);
+      },
+    });
+    return;
+  }
+
+  if (act === 'fcClear') {
+    const saved = state.existingDoc && state.existingDoc.pumps && state.existingDoc.pumps[pumpId];
+    const oldVal = saved ? saved[field] : state.pumps[pumpId][field];
+    const pumpLabel = (PUMPS.find(p => p.id === pumpId) || {}).label || pumpId;
+    openConfirmModal({
+      title: 'Clear this reading?',
+      body: `You're about to clear the <b>${fieldLabel(field)}</b> value for <b>${pumpLabel}</b> on <b>${state.date}</b> (currently <b>${fmt(oldVal)}</b>). You'll need to re-enter it. This can't be undone.`,
+      confirmLabel: 'Clear value',
+      neutral: false,
+      onConfirm: async () => {
+        state.pumps[pumpId][field] = field === 'test' ? 0 : null;
+        state.fieldEdit = { pumpId, field }; // leave it open for immediate re-entry
+        await saveReadings();
+        renderEntryBody();
+        const input = document.querySelector(`input[data-pump="${pumpId}"][data-role="${field}"]`);
+        if (input) input.focus();
+        showFcToast(`${pumpLabel} ${fieldLabel(field)} cleared`);
+      },
+    });
+    return;
+  }
+}
+
+function onDeleteDayClick() {
+  openConfirmModal({
+    title: "Delete this day's readings?",
+    body: `This permanently deletes the saved reading for <b>every pump</b> on <b>${state.date}</b>, including initial, final and test values. This cannot be undone.`,
+    confirmLabel: 'Delete readings',
+    neutral: false,
+    onConfirm: async () => {
+      await api('DELETE', '/readings/' + state.date, undefined, true);
+      showFcToast(`${state.date} readings deleted`);
+      await renderEntryForDate(state.date);
+    },
+  });
+}
+
+// ---------- lightweight confirm modal + toast (Readings tab only) ----------
+
+let fcPendingConfirm = null;
+
+function openConfirmModal({ title, body, confirmLabel, neutral, onConfirm }) {
+  document.getElementById('fcModalTitle').textContent = title;
+  document.getElementById('fcModalBody').innerHTML = body;
+  const confirmBtn = document.getElementById('fcModalConfirm');
+  confirmBtn.textContent = confirmLabel;
+  confirmBtn.className = 'fc-btn-confirm' + (neutral ? ' neutral' : '');
+  fcPendingConfirm = onConfirm;
+  document.getElementById('fcModalBackdrop').classList.add('show');
+}
+
+function closeConfirmModal() {
+  document.getElementById('fcModalBackdrop').classList.remove('show');
+  fcPendingConfirm = null;
+}
+
+function showFcToast(msg) {
+  const t = document.getElementById('fcToast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(window._fcToastTimer);
+  window._fcToastTimer = setTimeout(() => t.classList.remove('show'), 2200);
 }
 
 function onFieldChange(e) {
@@ -1309,6 +1479,18 @@ function main() {
   document.getElementById('switchRoleBtn').addEventListener('click', switchRole);
   document.getElementById('saveBtn').addEventListener('click', saveReadings);
   document.getElementById('dateInput').addEventListener('change', e => renderEntryForDate(e.target.value));
+
+  document.getElementById('fcModalCancel').addEventListener('click', closeConfirmModal);
+  document.getElementById('fcModalConfirm').addEventListener('click', async () => {
+    const fn = fcPendingConfirm;
+    document.getElementById('fcModalBackdrop').classList.remove('show');
+    fcPendingConfirm = null;
+    if (fn) await fn();
+  });
+  document.getElementById('fcModalBackdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'fcModalBackdrop') closeConfirmModal();
+  });
+
   renderRoleScreen();
 }
 

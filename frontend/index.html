@@ -56,10 +56,6 @@
       <div id="stockBody"><div class="loading">Loading&hellip;</div></div>
     </div>
 
-    <div id="view-history" class="hidden">
-      <div id="historyBody"><div class="loading">Loading&hellip;</div></div>
-    </div>
-
     <div id="view-analysis" class="hidden">
       <div id="analysisBody"><div class="loading">Loading&hellip;</div></div>
     </div>
@@ -72,6 +68,18 @@
     <div class="save-msg" id="saveMsg"></div>
   </div>
 </div>
+
+<div class="fc-modal-backdrop" id="fcModalBackdrop">
+  <div class="fc-modal-card">
+    <div class="fc-modal-title" id="fcModalTitle">Confirm change</div>
+    <div class="fc-modal-body" id="fcModalBody"></div>
+    <div class="fc-modal-actions">
+      <button class="fc-btn-cancel" id="fcModalCancel">Cancel</button>
+      <button class="fc-btn-confirm" id="fcModalConfirm">Confirm</button>
+    </div>
+  </div>
+</div>
+<div class="fc-toast" id="fcToast"></div>
 
 <script src="app.js"></script>
 </body>
