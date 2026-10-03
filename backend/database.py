@@ -76,7 +76,7 @@ def get_conn():
 def init_db():
     real_type = "DOUBLE PRECISION" if IS_PG else "REAL"
     with get_conn() as conn:
-        cur = conn.cursor() if IS_PG else conn
+        cur = conn.cursor()
         cur.execute(f"""
             CREATE TABLE IF NOT EXISTS readings (
                 date TEXT PRIMARY KEY,
