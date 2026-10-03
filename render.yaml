@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: pump-readings
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: OWNER_PASSWORD
+        sync: false
+      - key: PUMP_DB_PATH
+        value: /data/pump_readings.db
+    disk:
+      name: pump-data
+      mountPath: /data
+      sizeGB: 1

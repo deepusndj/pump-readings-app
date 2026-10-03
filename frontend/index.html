@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Pump Readings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="role-screen" id="roleScreen">
+  <div class="role-screen-inner">
+    <div class="role-brand">Pump Readings<small>Daily meter entry</small></div>
+    <div class="role-cards">
+      <button class="role-card" id="roleEmployeeBtn">
+        <div class="role-card-title">Employee</div>
+        <div class="role-card-sub">Enter daily readings, cost &amp; stock</div>
+      </button>
+      <button class="role-card owner" id="roleOwnerBtn">
+        <div class="role-card-title">Owner 🔒</div>
+        <div class="role-card-sub">Cost &amp; stock month-grid, history</div>
+      </button>
+    </div>
+    <div id="roleOwnerGate"></div>
+  </div>
+</div>
+
+<div class="wrap hidden" id="appWrap">
+  <header class="top">
+    <div class="brand-row">
+      <div class="brand">Pump Readings<small>Daily meter entry</small></div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button class="switch-role-btn" id="switchRoleBtn">Switch</button>
+        <span id="statusChip" class="status-chip new">&mdash;</span>
+      </div>
+    </div>
+    <div class="tabs" id="tabBar"></div>
+  </header>
+
+  <main>
+    <div id="view-entry">
+      <div class="date-row">
+        <input type="date" id="dateInput">
+      </div>
+      <div id="entryBody"><div class="loading">Loading&hellip;</div></div>
+    </div>
+
+    <div id="view-cost" class="hidden">
+      <div id="costBody"><div class="loading">Loading&hellip;</div></div>
+    </div>
+
+    <div id="view-stock" class="hidden">
+      <div id="stockBody"><div class="loading">Loading&hellip;</div></div>
+    </div>
+
+    <div id="view-history" class="hidden">
+      <div id="historyBody"><div class="loading">Loading&hellip;</div></div>
+    </div>
+
+    <div id="view-analysis" class="hidden">
+      <div id="analysisBody"><div class="loading">Loading&hellip;</div></div>
+    </div>
+  </main>
+</div>
+
+<div class="savebar hidden" id="savebar">
+  <div class="savebar-inner">
+    <button class="save-btn" id="saveBtn" disabled>Save today's readings</button>
+    <div class="save-msg" id="saveMsg"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
