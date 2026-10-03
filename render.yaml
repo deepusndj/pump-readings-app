@@ -1,4 +1,4 @@
-﻿services:
+services:
   - type: web
     name: pump-readings
     runtime: python
@@ -9,5 +9,5 @@
     envVars:
       - key: OWNER_PASSWORD
         sync: false
-      - key: PUMP_DB_PATH
-        value: pump_readings.db
+      - key: DATABASE_URL
+        sync: false
