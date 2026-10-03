@@ -1,4 +1,4 @@
-services:
+﻿services:
   - type: web
     name: pump-readings
     runtime: python
@@ -10,8 +10,4 @@ services:
       - key: OWNER_PASSWORD
         sync: false
       - key: PUMP_DB_PATH
-        value: /data/pump_readings.db
-    disk:
-      name: pump-data
-      mountPath: /data
-      sizeGB: 1
+        value: pump_readings.db
