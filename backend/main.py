@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 import database as db
 import ai_assistant
+import notify
 
 OWNER_PASSWORD = os.environ.get("OWNER_PASSWORD", "changeme")
 
@@ -87,9 +88,16 @@ def get_reading(date: str):
 
 @app.put("/api/readings/{date}")
 def put_reading(date: str, doc: ReadingDoc):
+    was_new = db.get_reading(date) is None
     data = doc.dict()
     data["submittedAt"] = now_iso()
     db.upsert_reading(date, data)
+    totals = data.get("totals") or {}
+    who = data.get("enteredBy") or "someone"
+    notify.push(
+        "Reading submitted" if was_new else "Reading updated",
+        f"{date} by {who} — petrol {totals.get('petrol', 0)} L, diesel {totals.get('diesel', 0)} L",
+    )
     return db.get_reading(date)
 
 
@@ -97,6 +105,7 @@ def put_reading(date: str, doc: ReadingDoc):
 def delete_reading(date: str, x_owner_password: Optional[str] = Header(None)):
     require_owner(x_owner_password)
     db.delete_reading(date)
+    notify.push("Reading deleted", f"{date} — deleted by owner", priority="high")
     return {"ok": True}
 
 
@@ -150,6 +159,7 @@ def add_cost_item(date: str, item: CostAppend):
     items = existing["items"] if existing else []
     items.append({"category": item.category, "amount": item.amount, "note": item.note})
     db.upsert_cost(date, items, item.enteredBy, now_iso())
+    notify.push("Expense added", f"{date} by {item.enteredBy or 'someone'} — {item.category}: {item.amount}")
     return db.get_cost(date)
 
 
@@ -158,6 +168,7 @@ def replace_cost(date: str, body: CostReplace, x_owner_password: Optional[str] =
     """Owner's month-grid editor: replace the whole items list for a date."""
     require_owner(x_owner_password)
     db.upsert_cost(date, [i.dict() for i in body.items], body.enteredBy, now_iso())
+    notify.push("Cost entry updated", f"{date} — edited by owner")
     return db.get_cost(date)
 
 
@@ -166,6 +177,7 @@ def set_cost_category(date: str, body: CostCategoryAmount, x_owner_password: Opt
     """Owner cost-table single-cell edit, and the stock tab's Fuel Purchase auto-calc."""
     require_owner(x_owner_password)
     db.upsert_cost_category_amount(date, body.category, body.amount, body.enteredBy)
+    notify.push("Cost updated", f"{date} — {body.category}: {body.amount}")
     return db.get_cost(date)
 
 
@@ -173,6 +185,7 @@ def set_cost_category(date: str, body: CostCategoryAmount, x_owner_password: Opt
 def delete_cost_category(date: str, category: str, x_owner_password: Optional[str] = Header(None)):
     require_owner(x_owner_password)
     db.delete_cost_category(date, category)
+    notify.push("Cost category removed", f"{date} — {category} deleted by owner", priority="high")
     return {"ok": True}
 
 
@@ -180,6 +193,7 @@ def delete_cost_category(date: str, category: str, x_owner_password: Optional[st
 def delete_cost(date: str, x_owner_password: Optional[str] = Header(None)):
     require_owner(x_owner_password)
     db.delete_cost(date)
+    notify.push("Cost entry deleted", f"{date} — deleted by owner", priority="high")
     return {"ok": True}
 
 
@@ -235,6 +249,7 @@ def put_stock(date: str, doc: StockDoc):
     )
     if doc.cost and doc.cost > 0:
         db.upsert_cost_category_amount(date, FUEL_PURCHASE_CATEGORY, doc.cost, doc.enteredBy)
+    notify.push("Stock entry saved", f"{date} by {doc.enteredBy or 'someone'}")
     return db.get_stock(date)
 
 
@@ -243,6 +258,7 @@ def delete_stock(date: str, x_owner_password: Optional[str] = Header(None)):
     require_owner(x_owner_password)
     db.delete_stock(date)
     db.delete_cost_category(date, FUEL_PURCHASE_CATEGORY)
+    notify.push("Stock entry deleted", f"{date} — deleted by owner", priority="high")
     return {"ok": True}
 
 
@@ -261,6 +277,7 @@ def put_rates(body: dict, x_owner_password: Optional[str] = Header(None)):
     current = db.get_setting("rates", db.DEFAULT_RATES)
     current.update(body)
     db.set_setting("rates", current)
+    notify.push("Rates updated", "Fuel rates changed by owner")
     return current
 
 
@@ -275,6 +292,7 @@ def put_targets(body: dict, x_owner_password: Optional[str] = Header(None)):
     current = db.get_setting("targets", db.DEFAULT_TARGETS)
     current.update(body)
     db.set_setting("targets", current)
+    notify.push("Targets updated", "Monthly targets changed by owner")
     return current
 
 
