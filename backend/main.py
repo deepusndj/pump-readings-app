@@ -408,6 +408,42 @@ def health():
     return db.health_summary()
 
 
+@app.get("/api/digest")
+def digest(date: Optional[str] = Query(None)):
+    """Factual, server-computed figures for a single day (default:
+    yesterday). Public and read-only, like the other GET endpoints — used
+    by the scheduled 'Friday' digest task so it reports real numbers
+    rather than an AI guess at arithmetic from raw JSON."""
+    target = date or (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    reading = db.get_reading(target)
+    cost = db.get_cost(target)
+    rates = ai_assistant.get_rates()
+    rate = ai_assistant.rate_for_date(target, rates)
+
+    if not reading:
+        return {"date": target, "entered": False}
+
+    totals = reading.get("totals") or {}
+    petrol_l = totals.get("petrol") or 0
+    diesel_l = totals.get("diesel") or 0
+    revenue = petrol_l * rate["petrol"] + diesel_l * rate["diesel"]
+    operating_cost = 0.0
+    for it in ((cost or {}).get("items") or []):
+        if it.get("category") != "Fuel Purchase":
+            operating_cost += it.get("amount") or 0
+
+    return {
+        "date": target,
+        "entered": True,
+        "petrolL": round(petrol_l, 2),
+        "dieselL": round(diesel_l, 2),
+        "revenue": round(revenue, 2),
+        "operatingCost": round(operating_cost, 2),
+        "netProfit": round(revenue - operating_cost, 2),
+        "status": reading.get("status", "ok"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Owner login check
 # ---------------------------------------------------------------------------
