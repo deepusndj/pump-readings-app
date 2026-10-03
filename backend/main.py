@@ -309,6 +309,20 @@ def ai_status():
     return {"configured": bool(ai_assistant.GEMINI_API_KEY), "suggestions": ai_assistant.AI_SUGGESTIONS}
 
 
+@app.post("/api/ai/briefing")
+async def ai_briefing(x_owner_password: Optional[str] = Header(None)):
+    require_owner(x_owner_password)
+    if not ai_assistant.GEMINI_API_KEY:
+        raise HTTPException(status_code=503, detail="AI Assistant isn't set up yet (no GEMINI_API_KEY on the server).")
+    try:
+        text = await ai_assistant.generate_briefing()
+    except ai_assistant.AiNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI Assistant error: {e}")
+    return {"text": text, "generatedAt": now_iso()}
+
+
 @app.post("/api/ai/send")
 async def ai_send(body: AiSendBody, x_owner_password: Optional[str] = Header(None)):
     require_owner(x_owner_password)

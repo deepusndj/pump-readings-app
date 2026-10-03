@@ -31,7 +31,7 @@ import httpx
 import database as db
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 PUMPS = [
@@ -224,6 +224,149 @@ def build_ai_snapshot():
         "last30DayAvg": {"petrolL": avg(last30, "petrolL"), "dieselL": avg(last30, "dieselL"), "netProfit": avg(last30, "netProfit")},
         "dailyLast90Days": daily,
     }
+
+
+# ---------------------------------------------------------------------------
+# Owner summary / daily briefing — a single plain-text Gemini call (no
+# tools, no conversation history), generated automatically whenever the
+# owner opens the Summary tab. Mirrors the artifact's buildBriefingContext /
+# briefingPrompt / generateBriefing.
+# ---------------------------------------------------------------------------
+
+def sum_range(start, end):
+    """Inclusive day offsets from today, e.g. (0,6) = last 7 days, oldest first."""
+    return [days_ago(i) for i in range(end, start - 1, -1)]
+
+
+def summarize_date_window(dates, readings_by_date, cost_by_date, rates):
+    margin_p = rates.get("marginPetrol", 2.75)
+    margin_d = rates.get("marginDiesel", 2.22)
+    petrol_l = diesel_l = revenue = cost = 0.0
+    days_with_entry = 0
+    missing_dates = []
+    review_flagged_dates = []
+    for d in dates:
+        r = readings_by_date.get(d)
+        if not r:
+            missing_dates.append(d)
+            continue
+        days_with_entry += 1
+        totals = r.get("totals") or {}
+        p, ds = totals.get("petrol") or 0, totals.get("diesel") or 0
+        petrol_l += p
+        diesel_l += ds
+        rate = rate_for_date(d, rates)
+        revenue += p * rate["petrol"] + ds * rate["diesel"]
+        cost += cost_by_date.get(d, 0)
+        if r.get("status") == "needs_review":
+            review_flagged_dates.append(d)
+    fuel_profit = petrol_l * margin_p + diesel_l * margin_d
+    return {
+        "totalDays": len(dates), "daysWithEntry": days_with_entry, "missingDates": missing_dates,
+        "petrolL": round(petrol_l), "dieselL": round(diesel_l),
+        "revenue": round(revenue), "operatingCost": round(cost),
+        "netProfit": round(fuel_profit - cost), "reviewFlaggedDates": review_flagged_dates,
+    }
+
+
+def find_unusual_days(dates, readings_by_date):
+    present = [d for d in dates if d in readings_by_date]
+    if len(present) < 4:
+        return []
+    avg_petrol = sum((readings_by_date[d].get("totals") or {}).get("petrol") or 0 for d in present) / len(present)
+    avg_diesel = sum((readings_by_date[d].get("totals") or {}).get("diesel") or 0 for d in present) / len(present)
+    unusual = []
+    for d in present:
+        totals = readings_by_date[d].get("totals") or {}
+        p, ds = totals.get("petrol") or 0, totals.get("diesel") or 0
+        if avg_petrol > 0 and (p < avg_petrol * 0.5 or p > avg_petrol * 1.6):
+            unusual.append({"date": d, "fuel": "petrol", "litres": round(p), "recentAvg": round(avg_petrol)})
+        if avg_diesel > 0 and (ds < avg_diesel * 0.5 or ds > avg_diesel * 1.6):
+            unusual.append({"date": d, "fuel": "diesel", "litres": round(ds), "recentAvg": round(avg_diesel)})
+    return unusual
+
+
+def shift_month(month_key, delta):
+    y, m = (int(x) for x in month_key.split("-"))
+    idx = (y * 12 + (m - 1)) + delta
+    return f"{idx // 12}-{(idx % 12) + 1:02d}"
+
+
+def build_briefing_context():
+    rates = get_rates()
+    targets = get_targets()
+    all_readings = db.list_readings(None, None, 1000)
+    all_costs = db.list_costs(None, None, 1000)
+    readings_by_date = {r["date"]: r for r in all_readings}
+    cost_by_date = {}
+    for c in all_costs:
+        total = sum((it.get("amount") or 0) for it in (c.get("items") or []))
+        cost_by_date[c["date"]] = cost_by_date.get(c["date"], 0) + total
+
+    this_week = summarize_date_window(sum_range(0, 6), readings_by_date, cost_by_date, rates)
+    last_week = summarize_date_window(sum_range(7, 13), readings_by_date, cost_by_date, rates)
+    last_30 = sum_range(0, 29)
+    this_month_key = today_str()[:7]
+    this_month = monthly_figures(this_month_key, rates, targets)
+    prev_month_key = shift_month(this_month_key, -1)
+    prev_month = monthly_figures(prev_month_key, rates, targets)
+    unusual_days = find_unusual_days(last_30, readings_by_date)
+
+    costs_by_category_last_30 = {}
+    last_30_set = set(last_30)
+    for c in all_costs:
+        if c["date"] in last_30_set:
+            for it in (c.get("items") or []):
+                costs_by_category_last_30[it["category"]] = costs_by_category_last_30.get(it["category"], 0) + (it.get("amount") or 0)
+
+    return {
+        "today": today_str(),
+        "thisWeek": this_week, "lastWeek": last_week,
+        "thisMonthToDate": {"month": this_month_key, "petrolL": round(this_month["petrolL"]), "dieselL": round(this_month["dieselL"]),
+                             "revenue": round(this_month["revenue"]), "operatingCost": round(this_month["operatingCost"]), "netProfit": round(this_month["netProfit"])},
+        "previousMonth": {"month": prev_month_key, "petrolL": round(prev_month["petrolL"]), "dieselL": round(prev_month["dieselL"]),
+                           "revenue": round(prev_month["revenue"]), "operatingCost": round(prev_month["operatingCost"]), "netProfit": round(prev_month["netProfit"])},
+        "unusualDaysLast30": unusual_days,
+        "costsByCategoryLast30": {k: round(v) for k, v in costs_by_category_last_30.items()},
+        "dailyTargetsL": targets,
+        "currentRates": {"petrol": rates.get("petrol"), "diesel": rates.get("diesel"),
+                          "marginPetrolPerL": rates.get("marginPetrol"), "marginDieselPerL": rates.get("marginDiesel")},
+    }
+
+
+def briefing_prompt(ctx):
+    return (
+        'You are the built-in AI analyst inside "Pump Readings", a daily entry and analytics app for a '
+        'Bharat Petroleum-franchised fuel station in India. The owner just opened the app. Write a short daily '
+        "briefing — the kind of 30-second update a sharp manager would give, not a report to study.\n\n"
+        "Cover, in a natural paragraph or two (not rigid labeled sections, no markdown headers): how sales for the "
+        "week look (litres and revenue — petrol and diesel), how sales for the month look so far (and vs. last "
+        "month if that comparison is meaningful), how costs are trending, and anything that stands out — a notably "
+        "good or bad day, a cost spike, a reading flagged for review, missing entries, or any other clear anomaly. "
+        'If "missingDates" is non-empty for the current week, say plainly which recent days have no reading logged '
+        "at all — that's important, don't bury it. If there is truly nothing unusual, say so briefly instead of "
+        "inventing concern. If there is barely any data at all, say that plainly instead of guessing.\n\n"
+        "Be concise — aim for under 120 words. Numbers-first, ₹ for money, L for litres, no fluff or greetings. "
+        "Do not repeat raw JSON back. Do not offer to do anything else or ask questions — this is a one-way "
+        "briefing, not a chat turn.\n\n"
+        "Data (JSON):\n" + json.dumps(ctx)
+    )
+
+
+async def generate_briefing():
+    if not GEMINI_API_KEY:
+        raise AiNotConfigured("GEMINI_API_KEY is not set on the server.")
+    ctx = build_briefing_context()
+    payload = {"contents": [{"role": "user", "parts": [{"text": briefing_prompt(ctx)}]}]}
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Gemini API error {resp.status_code}: {resp.text[:500]}")
+    data = resp.json()
+    candidates = data.get("candidates") or []
+    parts = (candidates[0]["content"].get("parts") or []) if candidates else []
+    text = "".join(p.get("text", "") for p in parts).strip()
+    return text or "(no briefing generated)"
 
 
 def system_instruction():

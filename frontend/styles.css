@@ -417,6 +417,23 @@ main { padding-top: 18px; }
 }
 .fc-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+/* ---- Summary tab (owner briefing) ---- */
+.briefing-card {
+  background: var(--surface-raised); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-edge); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 16px;
+}
+.briefing-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; gap: 10px; }
+.briefing-head h3 { margin: 0; font-size: 15px; font-weight: 700; }
+.briefing-when { font-size: 11px; color: var(--text-faint); white-space: nowrap; }
+.briefing-body { font-size: 13.5px; line-height: 1.65; color: var(--text); white-space: pre-wrap; }
+.briefing-body.thinking { color: var(--text-faint); font-style: italic; }
+.briefing-refresh {
+  margin-top: 12px; background: var(--surface); border: 1px solid var(--line); color: var(--text-dim); font-family: var(--font-ui);
+  font-size: 12px; font-weight: 600; padding: 7px 12px; border-radius: 999px; cursor: pointer;
+}
+.briefing-refresh:disabled { opacity: .5; cursor: not-allowed; }
+.briefing-kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+
 /* ---- AI Assistant tab ---- */
 .ai-intro { background: var(--surface-raised); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); box-shadow: var(--glass-edge); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 14px; }
 .ai-intro h3 { margin: 0 0 5px; font-size: 14.5px; font-weight: 600; }

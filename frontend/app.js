@@ -1193,6 +1193,29 @@ function targetChart(daily, fuelKey, target, color, width) {
   return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" xmlns="http://www.w3.org/2000/svg">${bars}${targetLine}</svg>`;
 }
 
+async function rangeFigures(from, to) {
+  const [readings, costs, rates] = await Promise.all([
+    api('GET', '/readings?from=' + from + '&to=' + to + '&limit=100'),
+    api('GET', '/costs?from=' + from + '&to=' + to + '&limit=100'),
+    getRates(),
+  ]);
+  const petrolL = readings.reduce((s, r) => s + (r.totals?.petrol || 0), 0);
+  const dieselL = readings.reduce((s, r) => s + (r.totals?.diesel || 0), 0);
+  const revenue = readings.reduce((s, r) => {
+    const rate = rateForDate(r.date, rates);
+    return s + (r.totals?.petrol || 0) * rate.petrol + (r.totals?.diesel || 0) * rate.diesel;
+  }, 0);
+  let operatingCost = 0;
+  costs.forEach(c => {
+    (Array.isArray(c.items) ? c.items : []).forEach(it => {
+      if (it.category !== 'Fuel Purchase') operatingCost += (it.amount || 0);
+    });
+  });
+  const marginP = rates.marginPetrol ?? 2.75, marginD = rates.marginDiesel ?? 2.22;
+  const netProfit = (petrolL * marginP + dieselL * marginD) - operatingCost;
+  return { petrolL, dieselL, revenue, operatingCost, netProfit };
+}
+
 async function monthlyFigures(monKey) {
   const { from, to } = monthDateRange(monKey);
   const [readings, costs, rates] = await Promise.all([
@@ -1417,6 +1440,107 @@ async function saveTargets() {
 }
 
 // ---------------------------------------------------------------------------
+// Summary tab (owner only) — first tab the owner sees. Shows an AI-written
+// daily briefing (generated automatically via /api/ai/briefing, not on
+// request) plus a few quick KPI cards. Ported from the artifact's
+// renderSummaryTab()/generateBriefing().
+// ---------------------------------------------------------------------------
+
+let ownerBriefing = null; // { text, generatedAt } | null
+let ownerBriefingBusy = false;
+
+function timeAgo(iso) {
+  const ms = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(ms / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + ' min ago';
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return hrs + ' hr ago';
+  return Math.round(hrs / 24) + ' d ago';
+}
+
+function renderBriefingBody(thinking) {
+  const bodyEl = document.getElementById('briefingBody');
+  const whenEl = document.getElementById('briefingWhen');
+  const refreshBtn = document.getElementById('briefingRefreshBtn');
+  if (!bodyEl) return;
+  if (thinking) {
+    bodyEl.className = 'briefing-body thinking';
+    bodyEl.textContent = 'Reading your data and putting together today\'s briefing…';
+    if (whenEl) whenEl.textContent = '';
+    if (refreshBtn) refreshBtn.disabled = true;
+    return;
+  }
+  bodyEl.className = 'briefing-body' + (ownerBriefing && ownerBriefing.error ? ' thinking' : '');
+  bodyEl.textContent = ownerBriefing ? ownerBriefing.text : '';
+  if (whenEl) whenEl.textContent = ownerBriefing && !ownerBriefing.unavailable ? 'Updated ' + timeAgo(ownerBriefing.generatedAt) : '';
+  if (refreshBtn) refreshBtn.disabled = false;
+}
+
+async function generateBriefing(force) {
+  if (ownerBriefingBusy) return;
+  if (!force && ownerBriefing) { renderBriefingBody(); return; }
+  ownerBriefingBusy = true;
+  renderBriefingBody(true);
+  try {
+    const status = await api('GET', '/ai/status');
+    if (!status || !status.configured) {
+      ownerBriefing = { text: 'AI Assistant isn\'t set up on this server yet, so an automatic briefing can\'t be generated. You can still check the Analysis tab for the numbers.', generatedAt: new Date().toISOString(), unavailable: true };
+      return;
+    }
+    const result = await api('POST', '/ai/briefing', {}, true);
+    ownerBriefing = { text: result.text, generatedAt: result.generatedAt };
+  } catch (e) {
+    ownerBriefing = { text: e.message || 'Couldn\'t generate a briefing right now — try refreshing.', generatedAt: new Date().toISOString(), error: true };
+  } finally {
+    ownerBriefingBusy = false;
+    renderBriefingBody();
+  }
+}
+
+function renderSummaryTab() {
+  const el = document.getElementById('summaryBody');
+  el.innerHTML = `
+    <div class="briefing-card">
+      <div class="briefing-head">
+        <h3>Today's briefing</h3>
+        <span class="briefing-when" id="briefingWhen"></span>
+      </div>
+      <div class="briefing-body" id="briefingBody"></div>
+      <button class="briefing-refresh" id="briefingRefreshBtn">Refresh briefing</button>
+    </div>
+    <div id="summaryQuickBody"><div class="loading">Loading…</div></div>`;
+
+  document.getElementById('briefingRefreshBtn').addEventListener('click', () => generateBriefing(true));
+  generateBriefing(false);
+  drawSummaryQuickFigures();
+}
+
+async function drawSummaryQuickFigures() {
+  const el = document.getElementById('summaryQuickBody');
+  if (!el) return;
+  try {
+    const today = todayStr();
+    const weekFrom = new Date(Date.now() - 6 * 86400000);
+    const weekFromStr = new Date(weekFrom - weekFrom.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    const [week, month] = await Promise.all([
+      rangeFigures(weekFromStr, today),
+      monthlyFigures(monthKey(today)),
+    ]);
+    el.innerHTML = `
+      <div class="briefing-kpis">
+        <div class="kpi-card"><div class="k-label">This week — petrol</div><div class="k-value">${fmt(week.petrolL)} L</div></div>
+        <div class="kpi-card"><div class="k-label">This week — diesel</div><div class="k-value">${fmt(week.dieselL)} L</div></div>
+        <div class="kpi-card"><div class="k-label">This week — revenue</div><div class="k-value">₹${fmt(week.revenue)}</div></div>
+        <div class="kpi-card profit ${week.netProfit < 0 ? 'negative' : ''}"><div class="k-label">This week — net profit</div><div class="k-value">₹${fmt(week.netProfit)}</div></div>
+        <div class="kpi-card" style="grid-column:1/3"><div class="k-label">${monthLabel(monthKey(today))} so far — net profit</div><div class="k-value">₹${fmt(month.profit)}</div></div>
+      </div>`;
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Couldn\'t load this week\'s figures.</div>';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // AI Assistant tab (owner only) — talks to /api/ai/send and /api/ai/resolve,
 // which run the same read/write "tools" the original Claude-Artifact
 // version had, backed by Gemini instead of window.claude.complete(). Every
@@ -1456,13 +1580,27 @@ function setThinkingAwaitingConfirm(el) {
   el.innerHTML = `<span>Waiting for your confirmation below ⬇</span>`;
 }
 
+function renderResolvedConfirmCard(items) {
+  const lines = items.map(it => `<div class="ai-confirm-text">${escapeHtml(it.summary)}</div>
+      <div class="ai-confirm-result">${it.confirmed ? '✓ Confirmed — saved' : '✕ Cancelled — nothing changed'}</div>`).join('<div style="height:8px"></div>');
+  const allConfirmed = items.every(it => it.confirmed);
+  const anyConfirmed = items.some(it => it.confirmed);
+  return `<div class="ai-confirm-card ${allConfirmed ? 'resolved-confirm' : (anyConfirmed ? '' : 'resolved-cancel')}">
+    <div class="ai-confirm-label">${items.length > 1 ? items.length + ' CHANGES' : 'CONFIRMED BEFORE SAVING'}</div>
+    ${lines}
+  </div>`;
+}
+
 function renderAiLog() {
   const log = document.getElementById('aiLog');
   if (!log) return;
   if (aiChat.turns.length === 0) {
     log.innerHTML = '<div class="ai-msg assistant">Hi — I\'m your station\'s AI assistant. Ask me anything about your readings, costs, margins or trends, ask for a forecast, or tell me to fix something and I\'ll do it.</div>';
   } else {
-    log.innerHTML = aiChat.turns.map(t => `<div class="ai-msg ${t.role}">${escapeHtml(t.content)}</div>`).join('');
+    log.innerHTML = aiChat.turns.map(t => {
+      if (t.role === 'confirm-record') return renderResolvedConfirmCard(t.items);
+      return `<div class="ai-msg ${t.role}">${escapeHtml(t.content)}</div>`;
+    }).join('');
   }
   if (aiChat.pending) renderPendingCards();
   log.scrollTop = log.scrollHeight;
@@ -1567,11 +1705,13 @@ function handleAiResult(result) {
 function renderPendingCards() {
   const log = document.getElementById('aiLog');
   document.getElementById('aiConfirmAllBar')?.remove();
-  log.querySelectorAll('.ai-confirm-card').forEach(el => el.remove());
+  // Only the live (currently-open) cards get rebuilt here — historical
+  // confirm-record cards from aiChat.turns stay in the log untouched.
+  log.querySelectorAll('.ai-pending-card').forEach(el => el.remove());
 
   aiChat.pending.forEach((p, i) => {
     const card = document.createElement('div');
-    card.className = 'ai-confirm-card' + (p.decided ? (p.confirmed ? ' resolved-confirm' : ' resolved-cancel') : '');
+    card.className = 'ai-confirm-card ai-pending-card' + (p.decided ? (p.confirmed ? ' resolved-confirm' : ' resolved-cancel') : '');
     card.innerHTML = `
       <div class="ai-confirm-label">CONFIRM BEFORE SAVING</div>
       <div class="ai-confirm-text"></div>
@@ -1622,7 +1762,11 @@ function decidePending(index, confirmed, skipRender) {
 async function maybeResolvePending() {
   if (!aiChat.pending || aiChat.pending.some(p => !p.decided)) return;
   const decisions = aiChat.pending.map(p => p.confirmed);
+  // Keep a permanent record of what was confirmed/cancelled in the log,
+  // instead of discarding the card once it's resolved.
+  aiChat.turns.push({ role: 'confirm-record', items: aiChat.pending.map(p => ({ summary: p.summary, confirmed: p.confirmed })) });
   aiChat.pending = null;
+  renderAiLog();
 
   const log = document.getElementById('aiLog');
   const thinkingEl = document.createElement('div');
@@ -1653,6 +1797,7 @@ async function maybeResolvePending() {
 
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.getElementById('view-summary').classList.toggle('hidden', tab !== 'summary');
   document.getElementById('view-entry').classList.toggle('hidden', tab !== 'entry');
   document.getElementById('view-cost').classList.toggle('hidden', tab !== 'cost');
   document.getElementById('view-stock').classList.toggle('hidden', tab !== 'stock');
@@ -1663,6 +1808,7 @@ function switchTab(tab) {
   if (tab === 'stock') { appRole === 'owner' ? renderOwnerStockTab() : renderStockTab(); }
   if (tab === 'analysis') renderAnalysisTab();
   if (tab === 'ai') renderAiTab();
+  if (tab === 'summary') renderSummaryTab();
 }
 
 function bindTabClicks() {
@@ -1694,10 +1840,10 @@ function enterApp(role) {
     <button class="tab" data-tab="cost">Cost</button>
     <button class="tab" data-tab="stock">Stock</button>`;
   tabBar.innerHTML = role === 'owner'
-    ? `${coreTabs}<button class="tab" data-tab="analysis">Analysis</button><button class="tab" data-tab="ai">AI Assistant</button>`
+    ? `<button class="tab" data-tab="summary">Summary</button>${coreTabs}<button class="tab" data-tab="analysis">Analysis</button><button class="tab" data-tab="ai">AI Assistant</button>`
     : coreTabs;
   bindTabClicks();
-  switchTab('entry');
+  switchTab(role === 'owner' ? 'summary' : 'entry');
   renderEntryForDate(state.date);
 }
 
