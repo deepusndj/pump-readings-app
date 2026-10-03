@@ -399,6 +399,16 @@ def backups_delete(backup_id: int, x_owner_password: Optional[str] = Header(None
 
 
 # ---------------------------------------------------------------------------
+# Health (public, no financial data) — used by the scheduled "Friday"
+# watchdog/digest tasks, which can only reach this via a plain GET.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/health")
+def health():
+    return db.health_summary()
+
+
+# ---------------------------------------------------------------------------
 # Owner login check
 # ---------------------------------------------------------------------------
 

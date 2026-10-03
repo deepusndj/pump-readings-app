@@ -419,6 +419,46 @@ def last_backup_at():
         return row["created_at"] if row else None
 
 
+def health_summary(missing_lookback_days=14):
+    """Non-sensitive status snapshot for monitoring (no financial figures),
+    safe to expose without owner auth. Used by the scheduled 'Friday'
+    watchdog task."""
+    today = datetime.date.today()
+    rows = list_readings(limit=1)
+    last_reading_date = rows[0]["date"] if rows else None
+    days_since_last_reading = None
+    if last_reading_date:
+        y, m, d = (int(x) for x in last_reading_date.split("-"))
+        days_since_last_reading = (today - datetime.date(y, m, d)).days
+
+    range_to = today - datetime.timedelta(days=1)  # yesterday — today isn't due yet
+    range_from = today - datetime.timedelta(days=missing_lookback_days)
+    window_rows = list_readings(date_from=range_from.isoformat(), date_to=range_to.isoformat(), limit=1000000)
+    present = {r["date"] for r in window_rows}
+    missing_days = []
+    cur = range_from
+    while cur <= range_to:
+        ds = cur.isoformat()
+        if ds not in present:
+            missing_days.append(ds)
+        cur += datetime.timedelta(days=1)
+
+    last_backup = last_backup_at()
+    backup_age_days = None
+    if last_backup:
+        last_dt = datetime.datetime.fromisoformat(last_backup.replace("Z", "+00:00"))
+        backup_age_days = (datetime.datetime.now(datetime.timezone.utc) - last_dt).days
+
+    return {
+        "today": today.isoformat(),
+        "lastReadingDate": last_reading_date,
+        "daysSinceLastReading": days_since_last_reading,
+        "missingDaysLast14": missing_days,
+        "lastBackupAt": last_backup,
+        "backupAgeDays": backup_age_days,
+    }
+
+
 def maybe_auto_backup(min_days=30):
     """Create an 'auto' backup if the last backup (of any kind) is older
     than `min_days`, or none exists yet. Cheap to call on every owner page
