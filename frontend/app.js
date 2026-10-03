@@ -136,11 +136,66 @@ async function loadPrevAndCurrent(dateStr) {
   return { existing, prevFinal };
 }
 
+// ---------------------------------------------------------------------------
+// Missing-days note (employee view only). Entry for day D is only ever made
+// on day D+1 ("today's readings get entered tomorrow"), so a day only
+// counts as "missed" once a full day has passed without it being entered —
+// today itself is never flagged, only yesterday and earlier.
+// ---------------------------------------------------------------------------
+
+const MISSING_DAYS_LOOKBACK = 14;
+
+function addDaysStr(dateStr, delta) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + delta);
+  return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+}
+
+function shortDay(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+async function renderMissingDaysNote() {
+  const el = document.getElementById('missingDaysNote');
+  if (!el) return;
+  if (appRole !== 'employee') { el.classList.add('hidden'); el.innerHTML = ''; return; }
+
+  const today = todayStr();
+  const rangeTo = addDaysStr(today, -1); // yesterday — today isn't due yet
+  const rangeFrom = addDaysStr(today, -MISSING_DAYS_LOOKBACK);
+
+  try {
+    const rows = await api('GET', '/readings?from=' + rangeFrom + '&to=' + rangeTo);
+    const present = new Set((rows || []).map(r => r.date));
+    const missing = [];
+    for (let d = rangeFrom; d <= rangeTo; d = addDaysStr(d, 1)) {
+      if (!present.has(d)) missing.push(d);
+    }
+    if (!missing.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+
+    missing.reverse(); // most recent first
+    const shown = missing.slice(0, 6);
+    const rest = missing.length - shown.length;
+    el.innerHTML = `
+      <div class="missing-note">
+        <span class="missing-note-label">${missing.length === 1 ? 'Missing day' : 'Missing days'}:</span>
+        ${shown.map(d => `<span class="missing-chip">${shortDay(d)}</span>`).join('')}
+        ${rest > 0 ? `<span class="missing-chip more">+${rest} more</span>` : ''}
+      </div>`;
+    el.classList.remove('hidden');
+  } catch (e) {
+    el.classList.add('hidden');
+    el.innerHTML = '';
+  }
+}
+
 async function renderEntryForDate(dateStr) {
   state.date = dateStr;
   const body = document.getElementById('entryBody');
   body.innerHTML = '<div class="loading">Loading readings&hellip;</div>';
   document.getElementById('saveBtn').disabled = true;
+  renderMissingDaysNote();
 
   let existing, prevFinal;
   try {
