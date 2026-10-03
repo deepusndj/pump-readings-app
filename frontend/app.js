@@ -1417,6 +1417,237 @@ async function saveTargets() {
 }
 
 // ---------------------------------------------------------------------------
+// AI Assistant tab (owner only) — talks to /api/ai/send and /api/ai/resolve,
+// which run the same read/write "tools" the original Claude-Artifact
+// version had, backed by Gemini instead of window.claude.complete(). Every
+// write is shown as a Confirm/Cancel card here first; nothing is saved
+// until the owner clicks Confirm.
+// ---------------------------------------------------------------------------
+
+const AI_SUGGESTIONS = [
+  'How did we do this month?',
+  'Forecast diesel sales for next month',
+  'Any anomalies in the last 30 days?',
+  'Where can we cut costs?',
+];
+
+let aiChat = {
+  turns: [],      // {role:'user'|'assistant', content} — kept for this visit only
+  sending: false,
+  history: [],    // Gemini "contents" array, resent on every call
+  pending: null,  // [{name, args, summary, decided, confirmed}] while a confirm batch is open
+  thinkingEl: null,
+  configured: null, // null = not checked yet
+};
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function setThinkingBusy(el, label) {
+  el.className = 'ai-msg assistant thinking';
+  el.innerHTML = `<span>${escapeHtml(label)}</span><span class="ai-busy-dots"><span></span><span></span><span></span></span>`;
+}
+
+function setThinkingAwaitingConfirm(el) {
+  el.className = 'ai-msg assistant awaiting-confirm';
+  el.innerHTML = `<span>Waiting for your confirmation below ⬇</span>`;
+}
+
+function renderAiLog() {
+  const log = document.getElementById('aiLog');
+  if (!log) return;
+  if (aiChat.turns.length === 0) {
+    log.innerHTML = '<div class="ai-msg assistant">Hi — I\'m your station\'s AI assistant. Ask me anything about your readings, costs, margins or trends, ask for a forecast, or tell me to fix something and I\'ll do it.</div>';
+  } else {
+    log.innerHTML = aiChat.turns.map(t => `<div class="ai-msg ${t.role}">${escapeHtml(t.content)}</div>`).join('');
+  }
+  if (aiChat.pending) renderPendingCards();
+  log.scrollTop = log.scrollHeight;
+}
+
+async function renderAiTab() {
+  const body = document.getElementById('aiBody');
+  if (aiChat.configured === null) {
+    try {
+      const status = await api('GET', '/ai/status');
+      aiChat.configured = !!(status && status.configured);
+    } catch (e) {
+      aiChat.configured = false;
+    }
+  }
+  body.innerHTML = `
+    <div class="ai-intro">
+      <h3>AI Assistant</h3>
+      <p>Ask about sales, costs, margins or trends, get a forecast, or ask it to add, change or delete a reading, expense, stock entry, target or rate. Every change shows you a Confirm/Cancel card right here first; nothing is saved or deleted until you tap Confirm.</p>
+    </div>
+    <div class="ai-chips" id="aiChips">${AI_SUGGESTIONS.map(s => `<button class="ai-chip" data-q="${s.replace(/"/g, '&quot;')}">${s}</button>`).join('')}</div>
+    <div class="ai-log" id="aiLog"></div>
+    <div class="ai-input-row">
+      <textarea id="aiInput" placeholder="Ask about your station, or tell it what to fix…" rows="1" ${aiChat.configured ? '' : 'disabled'}></textarea>
+      <button class="ai-send-btn" id="aiSendBtn" ${aiChat.configured ? '' : 'disabled'}>Send</button>
+    </div>
+    <div class="ai-note" id="aiNote">${aiChat.configured ? 'Can read your live data and make changes you ask for.' : 'AI Assistant isn\'t set up on this server yet (no API key configured).'}</div>`;
+
+  renderAiLog();
+
+  document.querySelectorAll('#aiChips .ai-chip').forEach(btn => {
+    btn.addEventListener('click', () => { if (!aiChat.sending) sendAiMessage(btn.dataset.q); });
+  });
+  document.getElementById('aiSendBtn').addEventListener('click', () => {
+    const box = document.getElementById('aiInput');
+    const text = box.value.trim();
+    if (text && !aiChat.sending) { box.value = ''; sendAiMessage(text); }
+  });
+  document.getElementById('aiInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const box = e.target;
+      const text = box.value.trim();
+      if (text && !aiChat.sending) { box.value = ''; sendAiMessage(text); }
+    }
+  });
+}
+
+async function sendAiMessage(text) {
+  if (aiChat.sending) return;
+  aiChat.sending = true;
+  aiChat.turns.push({ role: 'user', content: text });
+  renderAiLog();
+
+  const log = document.getElementById('aiLog');
+  document.querySelectorAll('#aiChips .ai-chip').forEach(b => b.disabled = true);
+  const sendBtn = document.getElementById('aiSendBtn');
+  if (sendBtn) sendBtn.disabled = true;
+
+  const thinkingEl = document.createElement('div');
+  setThinkingBusy(thinkingEl, 'Thinking…');
+  log.appendChild(thinkingEl);
+  log.scrollTop = log.scrollHeight;
+  aiChat.thinkingEl = thinkingEl;
+
+  try {
+    const result = await api('POST', '/ai/send', { history: aiChat.history, message: text }, true);
+    handleAiResult(result);
+  } catch (e) {
+    thinkingEl.remove();
+    aiChat.thinkingEl = null;
+    const bubble = document.createElement('div');
+    bubble.className = 'ai-msg error';
+    bubble.textContent = e.message || 'Something went wrong reaching the AI assistant — try again.';
+    log.appendChild(bubble);
+  } finally {
+    aiChat.sending = false;
+    document.querySelectorAll('#aiChips .ai-chip').forEach(b => b.disabled = false);
+    if (sendBtn) sendBtn.disabled = false;
+  }
+}
+
+function handleAiResult(result) {
+  aiChat.history = result.history || aiChat.history;
+  const thinkingEl = aiChat.thinkingEl;
+
+  if (result.status === 'done') {
+    if (thinkingEl) thinkingEl.remove();
+    aiChat.thinkingEl = null;
+    aiChat.turns.push({ role: 'assistant', content: result.text });
+    aiChat.pending = null;
+    renderAiLog();
+    return;
+  }
+
+  // status === 'confirm' — one or more write actions need the owner's okay.
+  if (thinkingEl) setThinkingAwaitingConfirm(thinkingEl);
+  aiChat.pending = result.pending.map(p => ({ ...p, decided: false, confirmed: false }));
+  renderAiLog();
+}
+
+function renderPendingCards() {
+  const log = document.getElementById('aiLog');
+  document.getElementById('aiConfirmAllBar')?.remove();
+  log.querySelectorAll('.ai-confirm-card').forEach(el => el.remove());
+
+  aiChat.pending.forEach((p, i) => {
+    const card = document.createElement('div');
+    card.className = 'ai-confirm-card' + (p.decided ? (p.confirmed ? ' resolved-confirm' : ' resolved-cancel') : '');
+    card.innerHTML = `
+      <div class="ai-confirm-label">CONFIRM BEFORE SAVING</div>
+      <div class="ai-confirm-text"></div>
+      <div class="ai-confirm-actions">
+        <button class="ai-confirm-btn confirm" ${p.decided ? 'disabled' : ''}>Confirm</button>
+        <button class="ai-confirm-btn cancel" ${p.decided ? 'disabled' : ''}>Cancel</button>
+      </div>
+      ${p.decided ? `<div class="ai-confirm-result">${p.confirmed ? '✓ Confirmed — saving…' : '✕ Cancelled — nothing changed'}</div>` : ''}`;
+    card.querySelector('.ai-confirm-text').textContent = p.summary;
+    if (!p.decided) {
+      card.querySelector('.confirm').addEventListener('click', () => decidePending(i, true));
+      card.querySelector('.cancel').addEventListener('click', () => decidePending(i, false));
+    }
+    log.appendChild(card);
+  });
+
+  const undecidedCount = aiChat.pending.filter(p => !p.decided).length;
+  if (undecidedCount > 1) {
+    const bar = document.createElement('div');
+    bar.id = 'aiConfirmAllBar';
+    bar.className = 'ai-confirm-all-bar';
+    bar.innerHTML = `
+      <div class="ai-confirm-all-text">${undecidedCount} changes waiting for confirmation</div>
+      <div class="ai-confirm-actions">
+        <button class="ai-confirm-btn confirm" id="aiConfirmAllBtn">Confirm all ${undecidedCount}</button>
+        <button class="ai-confirm-btn cancel" id="aiCancelAllBtn">Cancel all</button>
+      </div>`;
+    log.appendChild(bar);
+    document.getElementById('aiConfirmAllBtn').addEventListener('click', () => {
+      aiChat.pending.forEach((p, i) => { if (!p.decided) decidePending(i, true, true); });
+      maybeResolvePending();
+    });
+    document.getElementById('aiCancelAllBtn').addEventListener('click', () => {
+      aiChat.pending.forEach((p, i) => { if (!p.decided) decidePending(i, false, true); });
+      maybeResolvePending();
+    });
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+function decidePending(index, confirmed, skipRender) {
+  aiChat.pending[index].decided = true;
+  aiChat.pending[index].confirmed = confirmed;
+  if (!skipRender) renderPendingCards();
+  maybeResolvePending();
+}
+
+async function maybeResolvePending() {
+  if (!aiChat.pending || aiChat.pending.some(p => !p.decided)) return;
+  const decisions = aiChat.pending.map(p => p.confirmed);
+  aiChat.pending = null;
+
+  const log = document.getElementById('aiLog');
+  const thinkingEl = document.createElement('div');
+  setThinkingBusy(thinkingEl, 'Thinking…');
+  log.appendChild(thinkingEl);
+  log.scrollTop = log.scrollHeight;
+  aiChat.thinkingEl = thinkingEl;
+  aiChat.sending = true;
+
+  try {
+    const result = await api('POST', '/ai/resolve', { history: aiChat.history, decisions }, true);
+    handleAiResult(result);
+  } catch (e) {
+    thinkingEl.remove();
+    aiChat.thinkingEl = null;
+    const bubble = document.createElement('div');
+    bubble.className = 'ai-msg error';
+    bubble.textContent = e.message || 'Something went wrong reaching the AI assistant — try again.';
+    log.appendChild(bubble);
+  } finally {
+    aiChat.sending = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tabs / role gate
 // ---------------------------------------------------------------------------
 
@@ -1426,10 +1657,12 @@ function switchTab(tab) {
   document.getElementById('view-cost').classList.toggle('hidden', tab !== 'cost');
   document.getElementById('view-stock').classList.toggle('hidden', tab !== 'stock');
   document.getElementById('view-analysis').classList.toggle('hidden', tab !== 'analysis');
+  document.getElementById('view-ai').classList.toggle('hidden', tab !== 'ai');
   document.getElementById('savebar').classList.toggle('hidden', tab !== 'entry');
   if (tab === 'cost') { appRole === 'owner' ? renderOwnerCostTab() : renderCostTab(); }
   if (tab === 'stock') { appRole === 'owner' ? renderOwnerStockTab() : renderStockTab(); }
   if (tab === 'analysis') renderAnalysisTab();
+  if (tab === 'ai') renderAiTab();
 }
 
 function bindTabClicks() {
@@ -1461,7 +1694,7 @@ function enterApp(role) {
     <button class="tab" data-tab="cost">Cost</button>
     <button class="tab" data-tab="stock">Stock</button>`;
   tabBar.innerHTML = role === 'owner'
-    ? `${coreTabs}<button class="tab" data-tab="analysis">Analysis</button>`
+    ? `${coreTabs}<button class="tab" data-tab="analysis">Analysis</button><button class="tab" data-tab="ai">AI Assistant</button>`
     : coreTabs;
   bindTabClicks();
   switchTab('entry');

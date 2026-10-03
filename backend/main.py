@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import database as db
+import ai_assistant
 
 OWNER_PASSWORD = os.environ.get("OWNER_PASSWORD", "changeme")
 
@@ -274,6 +275,62 @@ def put_targets(body: dict, x_owner_password: Optional[str] = Header(None)):
     current.update(body)
     db.set_setting("targets", current)
     return current
+
+
+# ---------------------------------------------------------------------------
+# AI Assistant (owner-only) — ported from the original artifact's AI tab,
+# backed by Google Gemini's free API tier instead of window.claude.complete.
+# ---------------------------------------------------------------------------
+
+class AiSendBody(BaseModel):
+    history: list = []
+    message: str
+
+
+class AiResolveBody(BaseModel):
+    history: list = []
+    decisions: List[bool] = []
+
+
+def _ai_result(result: dict) -> dict:
+    # `history` here is what the frontend should store and resend next time
+    # (Gemini's own "contents" array) — renamed so it doesn't read as a
+    # browser history object.
+    out = {"status": result["status"], "history": result["contents"]}
+    if result["status"] == "done":
+        out["text"] = result["text"]
+    else:
+        out["pending"] = result["pending"]
+    return out
+
+
+@app.get("/api/ai/status")
+def ai_status():
+    return {"configured": bool(ai_assistant.GEMINI_API_KEY), "suggestions": ai_assistant.AI_SUGGESTIONS}
+
+
+@app.post("/api/ai/send")
+async def ai_send(body: AiSendBody, x_owner_password: Optional[str] = Header(None)):
+    require_owner(x_owner_password)
+    if not ai_assistant.GEMINI_API_KEY:
+        raise HTTPException(status_code=503, detail="AI Assistant isn't set up yet (no GEMINI_API_KEY on the server).")
+    try:
+        result = await ai_assistant.send_message(body.history, body.message)
+    except ai_assistant.AiNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI Assistant error: {e}")
+    return _ai_result(result)
+
+
+@app.post("/api/ai/resolve")
+async def ai_resolve(body: AiResolveBody, x_owner_password: Optional[str] = Header(None)):
+    require_owner(x_owner_password)
+    try:
+        result = await ai_assistant.resolve_turn(body.history, body.decisions)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI Assistant error: {e}")
+    return _ai_result(result)
 
 
 # ---------------------------------------------------------------------------
