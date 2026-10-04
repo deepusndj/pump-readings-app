@@ -311,6 +311,10 @@ class AiResolveBody(BaseModel):
     decisions: List[bool] = []
 
 
+class AiBriefingBody(BaseModel):
+    force: bool = False
+
+
 def _ai_result(result: dict) -> dict:
     # `history` here is what the frontend should store and resend next time
     # (Gemini's own "contents" array) — renamed so it doesn't read as a
@@ -329,17 +333,31 @@ def ai_status():
 
 
 @app.post("/api/ai/briefing")
-async def ai_briefing(x_owner_password: Optional[str] = Header(None)):
+async def ai_briefing(body: AiBriefingBody, x_owner_password: Optional[str] = Header(None)):
+    """Gemini's free tier has a small daily request quota, and the Summary
+    tab's briefing used to regenerate on every page load — which burns
+    through that quota fast with normal use. It's genuinely a *daily*
+    briefing, so cache it per calendar day and only call Gemini again when
+    the day has changed or the owner explicitly hits Refresh (force=True)."""
     require_owner(x_owner_password)
     if not ai_assistant.GEMINI_API_KEY:
         raise HTTPException(status_code=503, detail="AI Assistant isn't set up yet (no GEMINI_API_KEY on the server).")
+
+    today = datetime.date.today().isoformat()
+    cached = db.get_setting("dailyBriefing", {})
+    if not body.force and cached.get("dateKey") == today and cached.get("text"):
+        return {"text": cached["text"], "generatedAt": cached["generatedAt"], "cached": True}
+
     try:
         text = await ai_assistant.generate_briefing()
     except ai_assistant.AiNotConfigured as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI Assistant error: {e}")
-    return {"text": text, "generatedAt": now_iso()}
+
+    generated_at = now_iso()
+    db.set_setting("dailyBriefing", {"text": text, "generatedAt": generated_at, "dateKey": today})
+    return {"text": text, "generatedAt": generated_at, "cached": False}
 
 
 @app.post("/api/ai/send")

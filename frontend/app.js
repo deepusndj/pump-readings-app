@@ -1548,7 +1548,7 @@ async function generateBriefing(force) {
       ownerBriefing = { text: 'AI Assistant isn\'t set up on this server yet, so an automatic briefing can\'t be generated. You can still check the Analysis tab for the numbers.', generatedAt: new Date().toISOString(), unavailable: true };
       return;
     }
-    const result = await api('POST', '/ai/briefing', {}, true);
+    const result = await api('POST', '/ai/briefing', { force: !!force }, true);
     ownerBriefing = { text: result.text, generatedAt: result.generatedAt };
   } catch (e) {
     ownerBriefing = { text: e.message || 'Couldn\'t generate a briefing right now — try refreshing.', generatedAt: new Date().toISOString(), error: true };
