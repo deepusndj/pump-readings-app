@@ -22,6 +22,12 @@ const FUEL_TANKS = [{ id: 'petrol', label: 'Petrol tank', fuel: 'petrol' }, { id
 
 let appRole = null; // 'employee' | 'owner'
 
+// Owner password is kept in memory only (never persisted to localStorage or
+// sessionStorage) so it's needed to authenticate API calls during the
+// current session, but is always gone on a fresh page load/app reopen —
+// the owner password prompt is asked again every time, by design.
+let ownerPasswordMem = null;
+
 let state = {
   date: todayStr(),
   pumps: {},
@@ -46,8 +52,7 @@ let ratesCache = null;
 
 function ownerHeaders(extra) {
   const h = Object.assign({ 'Content-Type': 'application/json' }, extra || {});
-  const pw = localStorage.getItem('ownerPassword');
-  if (pw) h['X-Owner-Password'] = pw;
+  if (ownerPasswordMem) h['X-Owner-Password'] = ownerPasswordMem;
   return h;
 }
 
@@ -1112,7 +1117,7 @@ async function loadHistoryList() {
 // ---------------------------------------------------------------------------
 
 function ownerUnlocked() {
-  return !!localStorage.getItem('ownerPassword');
+  return !!ownerPasswordMem;
 }
 
 function renderOwnerLock(body, onUnlock) {
@@ -1137,7 +1142,7 @@ async function checkOwnerPassword(onUnlock) {
   try {
     const res = await fetch('/api/owner/login', { method: 'POST', headers: { 'X-Owner-Password': pw } });
     if (res.ok) {
-      localStorage.setItem('ownerPassword', pw);
+      ownerPasswordMem = pw;
       onUnlock();
     } else {
       msg.textContent = 'Incorrect password'; msg.className = 'form-msg err';
@@ -2020,7 +2025,7 @@ function enterApp(role) {
 }
 
 function switchRole() {
-  localStorage.removeItem('ownerPassword');
+  ownerPasswordMem = null;
   appRole = null;
   renderRoleScreen();
 }
