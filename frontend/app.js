@@ -39,7 +39,7 @@ let state = {
   name: '',
 };
 
-let costFormState = { date: todayStr(), category: COST_CATEGORIES[0], amount: '', note: '' };
+let costFormState = { date: todayStr(), category: COST_TABLE_CATEGORIES[0], amount: '', note: '' };
 let stockFormState = { date: todayStr() };
 let costTableState = { month: monthKey(todayStr()) };
 let stockTableState = { month: monthKey(todayStr()) };
@@ -599,7 +599,7 @@ async function renderCostTab() {
     <div class="simple-form">
       <div class="field"><label>Date</label><input type="date" id="costDate" value="${costFormState.date}"></div>
       <div class="field"><label>Category</label>
-        <select id="costCategory">${COST_CATEGORIES.map(c => `<option ${c === costFormState.category ? 'selected' : ''}>${c}</option>`).join('')}</select>
+        <select id="costCategory">${COST_TABLE_CATEGORIES.map(c => `<option ${c === costFormState.category ? 'selected' : ''}>${c}</option>`).join('')}</select>
       </div>
       <div class="field"><label>Amount (₹)</label><input type="number" inputmode="decimal" id="costAmount" placeholder="0" value="${costFormState.amount}"></div>
       <div class="field"><label>Note (optional)</label><input type="text" id="costNote" placeholder="e.g. invoice #, vendor" value="${costFormState.note}"></div>
