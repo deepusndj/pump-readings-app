@@ -256,9 +256,13 @@ def upsert_cost_category_amount(date, category, amount, entered_by):
     """
     existing = get_cost(date)
     items = existing["items"] if existing else []
+    # Keep any employee-written notes on the replaced items, so the owner
+    # editing an amount in the grid doesn't silently erase what it was for.
+    kept_notes = [it.get("note", "").strip() for it in items
+                  if it["category"] == category and (it.get("note") or "").strip()]
     items = [it for it in items if it["category"] != category]
     if amount and amount > 0:
-        items.append({"category": category, "amount": round(amount, 2), "note": ""})
+        items.append({"category": category, "amount": round(amount, 2), "note": "; ".join(kept_notes)})
     upsert_cost(date, items, entered_by, datetime.datetime.utcnow().isoformat() + "Z")
 
 

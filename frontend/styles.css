@@ -277,6 +277,19 @@ main { padding-top: 18px; }
 .cost-cell:focus { outline: none; border-color: var(--petrol); background: var(--surface-raised); }
 .cost-cell:disabled { opacity: 0.35; }
 .cost-cell.saving { opacity: 0.5; }
+/* Gold corner = this cell has a staff note; tapping the cell shows it. */
+.cost-table td.has-note { position: relative; }
+.cost-table td.has-note::after {
+  content: ''; position: absolute; top: 0; right: 0; pointer-events: none;
+  border-style: solid; border-width: 0 8px 8px 0; border-color: transparent var(--petrol) transparent transparent;
+}
+.cost-note-pop {
+  position: fixed; z-index: 1000; max-width: min(260px, calc(100vw - 16px));
+  background: var(--bg); color: var(--text); border: 1px solid var(--petrol); border-radius: 10px;
+  padding: 8px 11px; font-size: 12.5px; line-height: 1.45; box-shadow: 0 8px 22px rgba(0,0,0,.4);
+  pointer-events: none; overflow-wrap: anywhere;
+}
+.cost-note-line + .cost-note-line { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--line); }
 .cost-table-note, .stock-table-note { font-size: 12px; margin-top: 8px; min-height: 16px; }
 .cost-table-note.ok, .stock-table-note.ok { color: var(--ok); } .cost-table-note.err, .stock-table-note.err { color: var(--alert); }
 .cost-table-hint, .stock-table-hint { font-size: 12px; color: var(--text-faint); margin-bottom: 14px; line-height: 1.5; }

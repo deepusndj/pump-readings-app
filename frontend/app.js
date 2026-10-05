@@ -696,12 +696,79 @@ function costGridForMonth(monKey) {
   return grid;
 }
 
+// Employee-written notes per grid cell: notes[date][category] =
+// { multi, lines: [{ amount, note }] }. Only cells that have at least one
+// non-empty note appear, so "no entry" means "no popup".
+let ownerCostNotes = {};
+
+function costNotesForMonth(monKey) {
+  const notes = {};
+  (ownerCostCache || []).filter(c => monthKey(c.date) === monKey).forEach(c => {
+    const items = Array.isArray(c.items) ? c.items : [];
+    const countByCat = {};
+    items.forEach(it => { countByCat[it.category] = (countByCat[it.category] || 0) + 1; });
+    items.forEach(it => {
+      const note = (it.note || '').trim();
+      if (!note) return;
+      notes[c.date] = notes[c.date] || {};
+      const cell = notes[c.date][it.category] = notes[c.date][it.category] || { multi: countByCat[it.category] > 1, lines: [] };
+      cell.lines.push({ amount: it.amount || 0, note });
+    });
+  });
+  return notes;
+}
+
+let costNotePop = null;
+
+function hideCostNote() {
+  if (costNotePop) { costNotePop.remove(); costNotePop = null; }
+}
+
+function showCostNote(input) {
+  hideCostNote();
+  const cell = (ownerCostNotes[input.dataset.date] || {})[input.dataset.cat];
+  if (!cell) return;
+  const pop = document.createElement('div');
+  pop.className = 'cost-note-pop';
+  pop.setAttribute('role', 'note');
+  cell.lines.forEach(l => {
+    const line = document.createElement('div');
+    line.className = 'cost-note-line';
+    // textContent, not innerHTML: notes are free text typed by employees.
+    line.textContent = cell.multi ? `₹${fmt(l.amount)} — ${l.note}` : l.note;
+    pop.appendChild(line);
+  });
+  document.body.appendChild(pop);
+
+  // Sit just under the cell; flip above it if there isn't room (e.g. the
+  // phone keyboard is covering the bottom of the screen).
+  const r = input.getBoundingClientRect();
+  const viewH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  const pw = pop.offsetWidth, ph = pop.offsetHeight;
+  const left = Math.min(Math.max(8, r.left + r.width / 2 - pw / 2), window.innerWidth - pw - 8);
+  let top = r.bottom + 6;
+  if (top + ph > viewH - 8 && r.top - ph - 6 > 8) top = r.top - ph - 6;
+  pop.style.left = left + 'px';
+  pop.style.top = top + 'px';
+  costNotePop = pop;
+}
+
+function repositionCostNote() {
+  const el = document.activeElement;
+  if (costNotePop && el && el.classList && el.classList.contains('cost-cell')) showCostNote(el);
+}
+window.addEventListener('scroll', repositionCostNote, true);
+window.addEventListener('resize', repositionCostNote);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', repositionCostNote);
+
 function drawOwnerCostTable() {
+  hideCostNote();
   const body = document.getElementById('costBody');
   const monKey = costTableState.month;
   const [y, m] = monKey.split('-').map(Number);
   const daysInMonth = new Date(y, m, 0).getDate();
   const grid = costGridForMonth(monKey);
+  ownerCostNotes = costNotesForMonth(monKey);
   const todayKey = todayStr();
   const isCurrentOrFutureMonth = monKey >= monthKey(todayKey);
 
@@ -718,7 +785,8 @@ function drawOwnerCostTable() {
       const val = rowData[cat] || 0;
       rowTotal += val;
       colTotals[cat] += val;
-      return `<td><input type="text" inputmode="decimal" class="cost-cell" data-date="${dateStr}" data-cat="${cat}" value="${val ? val : ''}" placeholder="–"></td>`;
+      const hasNote = !!(ownerCostNotes[dateStr] && ownerCostNotes[dateStr][cat]);
+      return `<td${hasNote ? ' class="has-note"' : ''}><input type="text" inputmode="decimal" class="cost-cell" data-date="${dateStr}" data-cat="${cat}" value="${val ? val : ''}" placeholder="–"></td>`;
     }).join('');
     grandTotal += rowTotal;
     const dow = new Date(y, m - 1, day).toLocaleDateString(undefined, { weekday: 'short' });
@@ -738,7 +806,7 @@ function drawOwnerCostTable() {
       <div class="m-label">${monthLabel(monKey)}</div>
       <button id="costTableNextMonth" ${isCurrentOrFutureMonth ? 'disabled' : ''}>›</button>
     </div>
-    <div class="cost-table-hint">Tap any cell to edit that day's expense for that category. Changes save as soon as you leave the cell. Fuel purchase cost is tracked on the Stock tab instead.</div>
+    <div class="cost-table-hint">Tap any cell to edit that day's expense for that category. Changes save as soon as you leave the cell. A gold corner means the staff left a note — tap the cell to read it. Fuel purchase cost is tracked on the Stock tab instead.</div>
     <div class="cost-table-wrap">
       <table class="cost-table">
         <thead><tr><th class="cost-row-label">Day</th>${headerCells}<th>Total</th></tr></thead>
@@ -761,6 +829,8 @@ function drawOwnerCostTable() {
   }
   document.querySelectorAll('.cost-cell').forEach(input => {
     input.addEventListener('change', onCostCellChange);
+    input.addEventListener('focus', () => showCostNote(input));
+    input.addEventListener('blur', hideCostNote);
   });
 }
 
