@@ -96,7 +96,7 @@ def put_reading(date: str, doc: ReadingDoc):
     who = data.get("enteredBy") or "someone"
     notify.push(
         "Reading submitted" if was_new else "Reading updated",
-        f"{date} by {who} — petrol {totals.get('petrol', 0)} L, diesel {totals.get('diesel', 0)} L",
+        f"{date} by {who} — petrol {round(totals.get('petrol', 0) or 0, 2)} L, diesel {round(totals.get('diesel', 0) or 0, 2)} L",
     )
     return db.get_reading(date)
 

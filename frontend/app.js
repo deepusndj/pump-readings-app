@@ -120,7 +120,10 @@ function computeLitres(pumpId) {
   if (v.final === null || v.final === undefined || v.initial === null || v.initial === undefined) {
     return { litres: null, negative: false };
   }
-  const raw = v.final - v.initial - (v.test || 0);
+  // Round to 2dp — meter readings only have cents-level precision, and raw
+  // float subtraction (e.g. 97921.04 - 97858.93) produces noise like
+  // 62.11000000000058 that would otherwise get stored and shown verbatim.
+  const raw = Math.round((v.final - v.initial - (v.test || 0)) * 100) / 100;
   const negative = (v.final - v.initial) < 0;
   return { litres: raw, negative };
 }
@@ -566,8 +569,8 @@ async function saveReadings() {
     };
   });
 
-  const petrolTotal = PUMPS.filter(p => p.fuel === 'petrol').reduce((s, p) => s + (pumpsOut[p.id].litres || 0), 0);
-  const dieselTotal = PUMPS.filter(p => p.fuel === 'diesel').reduce((s, p) => s + (pumpsOut[p.id].litres || 0), 0);
+  const petrolTotal = Math.round(PUMPS.filter(p => p.fuel === 'petrol').reduce((s, p) => s + (pumpsOut[p.id].litres || 0), 0) * 100) / 100;
+  const dieselTotal = Math.round(PUMPS.filter(p => p.fuel === 'diesel').reduce((s, p) => s + (pumpsOut[p.id].litres || 0), 0) * 100) / 100;
 
   const data = {
     pumps: pumpsOut,
