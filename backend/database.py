@@ -62,7 +62,7 @@ def q(sql):
 @contextmanager
 def get_conn():
     if IS_PG:
-        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
     else:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row

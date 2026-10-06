@@ -80,7 +80,7 @@ async def gemini_generate(payload):
         model = models[-1] if (attempt == attempts - 1 and len(models) > 1) else models[0]
         delay = _RETRY_DELAYS[attempt] if attempt < len(_RETRY_DELAYS) else 0
         try:
-            async with httpx.AsyncClient(timeout=45) as client:
+            async with httpx.AsyncClient(timeout=25) as client:
                 resp = await client.post(_gemini_url(model), params={"key": GEMINI_API_KEY}, json=payload)
         except (httpx.TimeoutException, httpx.TransportError):
             last_error = RuntimeError("Gemini didn't respond in time. Try again in a minute.")

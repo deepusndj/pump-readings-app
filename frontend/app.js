@@ -59,7 +59,23 @@ function ownerHeaders(extra) {
 async function api(method, path, body, needsOwner) {
   const opts = { method, headers: needsOwner ? ownerHeaders() : { 'Content-Type': 'application/json' } };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch('/api' + path, opts);
+  // Reads time out after 20 s and retry once, so a slow wake-up shows an error
+  // (or recovers) instead of hanging on "Loading…" forever. AI calls are slow
+  // by nature and are left alone.
+  const isRead = method === 'GET' && !path.startsWith('/ai/');
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    const ctrl = isRead ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
+    try {
+      res = await fetch('/api' + path, ctrl ? Object.assign({}, opts, { signal: ctrl.signal }) : opts);
+      break;
+    } catch (e) {
+      if (!isRead || attempt >= 1) throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
   if (res.status === 404) return null;
   if (!res.ok) {
     let detail = '';
