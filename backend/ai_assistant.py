@@ -22,6 +22,7 @@ allows:
     the frontend holds it and resends it every call, the same way the rest
     of this app has no server-side session state.
 """
+import asyncio
 import datetime
 import json
 import os
@@ -32,7 +33,71 @@ import database as db
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+# Optional: a second model to try if the main one is overloaded. Left unset by
+# default — set GEMINI_FALLBACK_MODEL on Render to a model name you know is valid.
+GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "").strip()
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+
+def _gemini_url(model):
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+
+# Gemini's free tier regularly answers 429 (slow down) or 503 (overloaded) for a
+# few seconds at a time. Those are worth a couple of quick retries; a *daily*
+# quota 429 is not (it won't clear until tomorrow), nor are 4xx request errors.
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_RETRY_DELAYS = [1.5, 4.0]  # seconds between attempts -> 3 attempts total
+
+
+def _is_daily_quota(status, body):
+    return status == 429 and ("perday" in body.lower() or "per day" in body.lower())
+
+
+def _friendly_gemini_error(status, body):
+    if _is_daily_quota(status, body):
+        return f"Gemini's free daily limit has been reached — it resets daily, so try again later today or tomorrow. (Gemini {status})"
+    if status == 429:
+        return f"Gemini is limiting requests for a moment (free tier). Wait a minute and try again. (Gemini {status})"
+    if status in (500, 502, 503, 504):
+        return f"Gemini is overloaded right now. Try again in a minute. (Gemini {status})"
+    if status == 404:
+        return f"Gemini couldn't find the configured model — it may have been renamed or retired; check GEMINI_MODEL. (Gemini {status}: {body[:200]})"
+    return f"Gemini API error {status}: {body[:300]}"
+
+
+async def gemini_generate(payload):
+    """POST a generateContent request, retrying transient failures (overload,
+    rate-limit, timeouts) up to 3 times with a short backoff. If
+    GEMINI_FALLBACK_MODEL is set, the last attempt uses it. Returns the parsed
+    JSON response, or raises RuntimeError with a plain-English message."""
+    models = [GEMINI_MODEL]
+    if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
+        models.append(GEMINI_FALLBACK_MODEL)
+    attempts = len(_RETRY_DELAYS) + 1
+    last_error = None
+    for attempt in range(attempts):
+        model = models[-1] if (attempt == attempts - 1 and len(models) > 1) else models[0]
+        delay = _RETRY_DELAYS[attempt] if attempt < len(_RETRY_DELAYS) else 0
+        try:
+            async with httpx.AsyncClient(timeout=45) as client:
+                resp = await client.post(_gemini_url(model), params={"key": GEMINI_API_KEY}, json=payload)
+        except (httpx.TimeoutException, httpx.TransportError):
+            last_error = RuntimeError("Gemini didn't respond in time. Try again in a minute.")
+        else:
+            if resp.status_code == 200:
+                return resp.json()
+            body = resp.text[:500]
+            last_error = RuntimeError(_friendly_gemini_error(resp.status_code, body))
+            if resp.status_code not in _RETRYABLE_STATUS or _is_daily_quota(resp.status_code, body):
+                raise last_error
+            try:  # honour a server-suggested wait, but never stall the request long
+                delay = max(delay, min(float(resp.headers.get("retry-after", 0)), 8.0))
+            except ValueError:
+                pass
+        if delay and attempt < attempts - 1:
+            await asyncio.sleep(delay)
+    raise last_error
 
 PUMPS = [
     {"id": "petrolA1", "label": "Petrol A1", "fuel": "petrol"},
@@ -358,11 +423,7 @@ async def generate_briefing():
         raise AiNotConfigured("GEMINI_API_KEY is not set on the server.")
     ctx = build_briefing_context()
     payload = {"contents": [{"role": "user", "parts": [{"text": briefing_prompt(ctx)}]}]}
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Gemini API error {resp.status_code}: {resp.text[:500]}")
-    data = resp.json()
+    data = await gemini_generate(payload)
     candidates = data.get("candidates") or []
     parts = (candidates[0]["content"].get("parts") or []) if candidates else []
     text = "".join(p.get("text", "") for p in parts).strip()
@@ -740,11 +801,7 @@ async def call_gemini(contents):
         "contents": contents,
         "tools": ALL_TOOLS,
     }
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Gemini API error {resp.status_code}: {resp.text[:500]}")
-    data = resp.json()
+    data = await gemini_generate(payload)
     candidates = data.get("candidates") or []
     if not candidates:
         return {"role": "model", "parts": [{"text": "(no response)"}]}
