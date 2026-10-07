@@ -72,6 +72,18 @@ def _seconds_until_next_run(hour: int, minute: int, tz: ZoneInfo) -> float:
     return (target - now).total_seconds()
 
 
+async def send_daily_briefing_now(force: bool = False) -> dict:
+    """Generate (or reuse today's cached) briefing and push it to every
+    configured notify channel (Telegram, ntfy). Used by the scheduled loop
+    below and by the owner-triggered manual-send endpoint, so a one-off
+    test push behaves identically to the real 4:30pm run."""
+    if not ai_assistant.GEMINI_API_KEY:
+        return {"sent": False, "reason": "GEMINI_API_KEY not set on the server"}
+    result = await get_or_generate_daily_briefing(force=force)
+    notify.push("Daily Briefing", result["text"])
+    return {"sent": True, "cached": result["cached"], "text": result["text"], "generatedAt": result["generatedAt"]}
+
+
 async def _daily_briefing_loop():
     try:
         hour_str, minute_str = DAILY_BRIEFING_TIME.split(":")
@@ -87,12 +99,8 @@ async def _daily_briefing_loop():
         logger.info("daily briefing: next run in %.0f min (%s %s)", wait_s / 60, DAILY_BRIEFING_TIME, DAILY_BRIEFING_TZ)
         await asyncio.sleep(wait_s)
         try:
-            if not ai_assistant.GEMINI_API_KEY:
-                logger.info("daily briefing: skipped, GEMINI_API_KEY not set")
-            else:
-                result = await get_or_generate_daily_briefing(force=False)
-                notify.push("Daily Briefing", result["text"])
-                logger.info("daily briefing: sent (cached=%s)", result["cached"])
+            result = await send_daily_briefing_now(force=False)
+            logger.info("daily briefing: %s", result)
         except Exception as e:
             logger.error("daily briefing: failed: %r", e)
         # Sleep past the target minute so the next loop iteration's
@@ -414,6 +422,23 @@ async def ai_briefing(body: AiBriefingBody, x_owner_password: Optional[str] = He
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI Assistant error: {e}")
+
+
+@app.post("/api/ai/briefing/send-now")
+async def ai_briefing_send_now(body: AiBriefingBody, x_owner_password: Optional[str] = Header(None)):
+    """Manually fire the same daily-briefing-to-Telegram push the 4:30pm
+    scheduled job sends, for testing. Owner-only since it's a real push to
+    the configured channels, not just a read."""
+    require_owner(x_owner_password)
+    try:
+        result = await send_daily_briefing_now(force=body.force)
+    except ai_assistant.AiNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI Assistant error: {e}")
+    if not result["sent"]:
+        raise HTTPException(status_code=503, detail=result["reason"])
+    return result
 
 
 @app.post("/api/ai/send")
