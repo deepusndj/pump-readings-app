@@ -11,9 +11,12 @@ Run locally:
 
 Deploy (Render, free tier): see ../README.md
 """
+import asyncio
+import logging
 import os
 import datetime
 from typing import Optional, List
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +30,15 @@ import notify
 
 OWNER_PASSWORD = os.environ.get("OWNER_PASSWORD", "changeme")
 
+logger = logging.getLogger("daily_briefing")
+
+# Daily Gemini briefing -> Telegram push, run inside this process on its own
+# timer (no external trigger needed). Defaults to 4:30pm NZ time; override
+# with env vars if the station's needs change without a code edit.
+DAILY_BRIEFING_ENABLED = os.environ.get("DAILY_BRIEFING_ENABLED", "true").strip().lower() not in ("false", "0", "")
+DAILY_BRIEFING_TIME = os.environ.get("DAILY_BRIEFING_TIME", "16:30").strip()
+DAILY_BRIEFING_TZ = os.environ.get("DAILY_BRIEFING_TZ", "Pacific/Auckland").strip()
+
 app = FastAPI(title="Pump Readings API")
 
 app.add_middleware(
@@ -37,9 +49,62 @@ app.add_middleware(
 )
 
 
+async def get_or_generate_daily_briefing(force: bool = False) -> dict:
+    """Shared by the owner-facing /api/ai/briefing endpoint and the daily
+    scheduled push below, so both honor the same once-a-day Gemini cache
+    (Gemini's free tier has a small daily quota)."""
+    today = datetime.date.today().isoformat()
+    cached = db.get_setting("dailyBriefing", {})
+    if not force and cached.get("dateKey") == today and cached.get("text"):
+        return {"text": cached["text"], "generatedAt": cached["generatedAt"], "cached": True}
+
+    text = await ai_assistant.generate_briefing()
+    generated_at = now_iso()
+    db.set_setting("dailyBriefing", {"text": text, "generatedAt": generated_at, "dateKey": today})
+    return {"text": text, "generatedAt": generated_at, "cached": False}
+
+
+def _seconds_until_next_run(hour: int, minute: int, tz: ZoneInfo) -> float:
+    now = datetime.datetime.now(tz)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += datetime.timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def _daily_briefing_loop():
+    try:
+        hour_str, minute_str = DAILY_BRIEFING_TIME.split(":")
+        hour, minute = int(hour_str), int(minute_str)
+        tz = ZoneInfo(DAILY_BRIEFING_TZ)
+    except Exception:
+        logger.error("daily briefing scheduler disabled: bad DAILY_BRIEFING_TIME=%r or DAILY_BRIEFING_TZ=%r",
+                      DAILY_BRIEFING_TIME, DAILY_BRIEFING_TZ)
+        return
+
+    while True:
+        wait_s = _seconds_until_next_run(hour, minute, tz)
+        logger.info("daily briefing: next run in %.0f min (%s %s)", wait_s / 60, DAILY_BRIEFING_TIME, DAILY_BRIEFING_TZ)
+        await asyncio.sleep(wait_s)
+        try:
+            if not ai_assistant.GEMINI_API_KEY:
+                logger.info("daily briefing: skipped, GEMINI_API_KEY not set")
+            else:
+                result = await get_or_generate_daily_briefing(force=False)
+                notify.push("Daily Briefing", result["text"])
+                logger.info("daily briefing: sent (cached=%s)", result["cached"])
+        except Exception as e:
+            logger.error("daily briefing: failed: %r", e)
+        # Sleep past the target minute so the next loop iteration's
+        # "already passed today" check rolls over to tomorrow.
+        await asyncio.sleep(60)
+
+
 @app.on_event("startup")
-def _startup():
+async def _startup():
     db.init_db()
+    if DAILY_BRIEFING_ENABLED:
+        asyncio.create_task(_daily_briefing_loop())
 
 
 def now_iso():
@@ -343,21 +408,12 @@ async def ai_briefing(body: AiBriefingBody, x_owner_password: Optional[str] = He
     if not ai_assistant.GEMINI_API_KEY:
         raise HTTPException(status_code=503, detail="AI Assistant isn't set up yet (no GEMINI_API_KEY on the server).")
 
-    today = datetime.date.today().isoformat()
-    cached = db.get_setting("dailyBriefing", {})
-    if not body.force and cached.get("dateKey") == today and cached.get("text"):
-        return {"text": cached["text"], "generatedAt": cached["generatedAt"], "cached": True}
-
     try:
-        text = await ai_assistant.generate_briefing()
+        return await get_or_generate_daily_briefing(force=body.force)
     except ai_assistant.AiNotConfigured as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI Assistant error: {e}")
-
-    generated_at = now_iso()
-    db.set_setting("dailyBriefing", {"text": text, "generatedAt": generated_at, "dateKey": today})
-    return {"text": text, "generatedAt": generated_at, "cached": False}
 
 
 @app.post("/api/ai/send")
