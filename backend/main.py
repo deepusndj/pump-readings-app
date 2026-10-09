@@ -38,6 +38,11 @@ logger = logging.getLogger("daily_briefing")
 DAILY_BRIEFING_ENABLED = os.environ.get("DAILY_BRIEFING_ENABLED", "true").strip().lower() not in ("false", "0", "")
 DAILY_BRIEFING_TIME = os.environ.get("DAILY_BRIEFING_TIME", "16:30").strip()
 DAILY_BRIEFING_TZ = os.environ.get("DAILY_BRIEFING_TZ", "Pacific/Auckland").strip()
+# Weekly self-check ("Friday" diagnostics): runs on this weekday (0=Mon) at this
+# local time and always reports to Telegram, all-clear or not.
+WEEKLY_CHECK_ENABLED = os.environ.get("WEEKLY_CHECK_ENABLED", "true").strip().lower() not in ("false", "0", "")
+WEEKLY_CHECK_WEEKDAY = int(os.environ.get("WEEKLY_CHECK_WEEKDAY", "0"))
+WEEKLY_CHECK_TIME = os.environ.get("WEEKLY_CHECK_TIME", "09:00").strip()
 
 app = FastAPI(title="Pump Readings API")
 
@@ -154,11 +159,110 @@ async def _daily_briefing_loop():
         await asyncio.sleep(60)
 
 
+async def run_weekly_diagnostics() -> dict:
+    """Checks the things that have actually broken before: database
+    reachability/speed, missing readings, backups, Gemini, and Telegram
+    delivery. Returns {ok, issues, lines}."""
+    import time
+    issues, lines = [], []
+
+    # database + data freshness
+    try:
+        t0 = time.monotonic()
+        h = await asyncio.to_thread(db.health_summary)
+        ms = int((time.monotonic() - t0) * 1000)
+        lines.append(f"Database: OK ({ms} ms)")
+        if ms > 5000:
+            issues.append(f"Database is slow ({ms} ms)")
+        last = h.get("lastReadingDate")
+        since = h.get("daysSinceLastReading")
+        if last is None:
+            issues.append("No readings in the database at all")
+        else:
+            lines.append(f"Last reading: {last} ({since} days ago)")
+            if since is not None and since >= 3:
+                issues.append(f"No reading entered for {since} days (last: {last})")
+        missing = h.get("missingDaysLast14") or []
+        lines.append(f"Missing readings, last 14 days: {', '.join(missing) if missing else 'none'}")
+        if len(missing) > 3:
+            issues.append(f"{len(missing)} days missing in the last 14")
+        age = h.get("backupAgeDays")
+        if age is None:
+            issues.append("No backup has ever been made")
+        else:
+            lines.append(f"Last backup: {age} days ago")
+            if age >= 35:
+                issues.append(f"Last backup is {age} days old — make one in Summary > Backups")
+    except Exception as e:
+        issues.append(f"Database check failed: {e!r}")
+        lines.append("Database: FAILED")
+
+    # Gemini
+    if not ai_assistant.GEMINI_API_KEY:
+        issues.append("Gemini is not configured (GEMINI_API_KEY missing)")
+        lines.append("Gemini: not configured")
+    else:
+        try:
+            t0 = time.monotonic()
+            await ai_assistant.gemini_generate({"contents": [{"role": "user", "parts": [{"text": "Reply with the single word OK."}]}]})
+            lines.append(f"Gemini: OK ({int((time.monotonic() - t0) * 1000)} ms)")
+        except Exception as e:
+            issues.append(f"Gemini not responding: {e}")
+            lines.append("Gemini: FAILED")
+
+    # Telegram: the delivery of this report is itself the proof; flag if unconfigured
+    if not (notify.TELEGRAM_URL and notify.TELEGRAM_CHAT_ID):
+        issues.append("Telegram is not configured on the server")
+
+    return {"ok": not issues, "issues": issues, "lines": lines}
+
+
+def _weekly_report_text(result: dict) -> tuple:
+    if result["ok"]:
+        title = "Weekly check: all OK"
+        body = "Everything is working.\n" + "\n".join(result["lines"])
+    else:
+        n = len(result["issues"])
+        title = f"Weekly check: {n} issue{'s' if n != 1 else ''}"
+        body = "Needs attention:\n- " + "\n- ".join(result["issues"]) + "\n\nDetails:\n" + "\n".join(result["lines"])
+    return title, body
+
+
+async def _weekly_check_loop():
+    try:
+        hour_str, minute_str = WEEKLY_CHECK_TIME.split(":")
+        hour, minute = int(hour_str), int(minute_str)
+        tz = ZoneInfo(DAILY_BRIEFING_TZ)
+    except Exception:
+        logger.error("weekly check disabled: bad WEEKLY_CHECK_TIME=%r", WEEKLY_CHECK_TIME)
+        return
+    while True:
+        now = datetime.datetime.now(tz)
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        target += datetime.timedelta(days=(WEEKLY_CHECK_WEEKDAY - now.weekday()) % 7)
+        if target <= now:
+            target += datetime.timedelta(days=7)
+        wait_s = (target - now).total_seconds()
+        logger.info("weekly check: next run in %.1f h", wait_s / 3600)
+        await asyncio.sleep(wait_s)
+        try:
+            result = await run_weekly_diagnostics()
+            title, body = _weekly_report_text(result)
+            notify.push(title, body)
+            logger.info("weekly check: %s", title)
+        except Exception as e:
+            logger.error("weekly check: failed: %r", e)
+            notify.push("Weekly check: could not run", repr(e))
+        await asyncio.sleep(60)
+
+
 @app.on_event("startup")
 async def _startup():
     db.init_db()
     if DAILY_BRIEFING_ENABLED:
         asyncio.create_task(_daily_briefing_loop())
+    if WEEKLY_CHECK_ENABLED:
+        asyncio.create_task(_weekly_check_loop())
 
 
 def now_iso():
