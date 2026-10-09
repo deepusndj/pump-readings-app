@@ -72,16 +72,62 @@ def _seconds_until_next_run(hour: int, minute: int, tz: ZoneInfo) -> float:
     return (target - now).total_seconds()
 
 
+def plain_evening_summary() -> str:
+    """Numbers-only summary built straight from the database — no AI. Used
+    when Gemini is unavailable so the 4:30pm Telegram message still arrives."""
+    tz = ZoneInfo(DAILY_BRIEFING_TZ)
+    today = datetime.datetime.now(tz).date()
+    first = today.replace(day=1)
+    t = _day_figures(today.isoformat())
+    lines = []
+    if t["entered"]:
+        lines.append(
+            f"Today ({today.isoformat()}): petrol {t['petrolL']} L, diesel {t['dieselL']} L, "
+            f"revenue {t['revenue']:.0f}, cost {t['operatingCost']:.0f}, net {t['netProfit']:.0f}."
+            + (" Needs review (meter-reset flag)." if t.get("status") == "needs_review" else ""))
+    else:
+        lines.append(f"Today ({today.isoformat()}): no reading entered yet.")
+    petrol = diesel = revenue = cost = net = 0.0
+    entered_days = 0
+    missing = []
+    d = first
+    while d < today:
+        f = _day_figures(d.isoformat())
+        if f["entered"]:
+            entered_days += 1
+            petrol += f["petrolL"]; diesel += f["dieselL"]; revenue += f["revenue"]
+            cost += f["operatingCost"]; net += f["netProfit"]
+        else:
+            missing.append(d.isoformat())
+        d += datetime.timedelta(days=1)
+    if t["entered"]:
+        entered_days += 1
+        petrol += t["petrolL"]; diesel += t["dieselL"]; revenue += t["revenue"]
+        cost += t["operatingCost"]; net += t["netProfit"]
+    lines.append(
+        f"Month to date ({entered_days} days): petrol {petrol:.0f} L, diesel {diesel:.0f} L, "
+        f"revenue {revenue:.0f}, cost {cost:.0f}, net {net:.0f}.")
+    lines.append("Missing readings: " + (", ".join(missing) if missing else "none") + ".")
+    return "\n".join(lines)
+
+
 async def send_daily_briefing_now(force: bool = False) -> dict:
-    """Generate (or reuse today's cached) briefing and push it to every
-    configured notify channel (Telegram, ntfy). Used by the scheduled loop
-    below and by the owner-triggered manual-send endpoint, so a one-off
-    test push behaves identically to the real 4:30pm run."""
-    if not ai_assistant.GEMINI_API_KEY:
-        return {"sent": False, "reason": "GEMINI_API_KEY not set on the server"}
-    result = await get_or_generate_daily_briefing(force=force)
-    notify.push("Daily Briefing", result["text"])
-    return {"sent": True, "cached": result["cached"], "text": result["text"], "generatedAt": result["generatedAt"]}
+    """Generate (or reuse today's cached) AI briefing and push it to every
+    configured notify channel (Telegram, ntfy). If Gemini is unavailable or
+    errors, fall back to a plain numbers summary so a message always goes
+    out. Used by the scheduled loop below and the owner-triggered manual-send
+    endpoint, so a one-off test push behaves like the real 4:30pm run."""
+    try:
+        if not ai_assistant.GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY not set on the server")
+        result = await get_or_generate_daily_briefing(force=force)
+        notify.push("Daily Briefing", result["text"])
+        return {"sent": True, "cached": result["cached"], "text": result["text"], "generatedAt": result["generatedAt"]}
+    except Exception as e:
+        logger.error("daily briefing: AI failed, sending plain summary instead: %r", e)
+        text = await asyncio.to_thread(plain_evening_summary)
+        notify.push("Evening summary", text)
+        return {"sent": True, "fallback": True, "reason": str(e), "text": text}
 
 
 async def _daily_briefing_loop():
@@ -533,13 +579,9 @@ def notify_test():
     return notify.test()
 
 
-@app.get("/api/digest")
-def digest(date: Optional[str] = Query(None)):
-    """Factual, server-computed figures for a single day (default:
-    yesterday). Public and read-only, like the other GET endpoints — used
-    by the scheduled 'Friday' digest task so it reports real numbers
-    rather than an AI guess at arithmetic from raw JSON."""
-    target = date or (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+def _day_figures(target: str) -> dict:
+    """Server-computed figures for one date (shared by /api/digest and the
+    evening Telegram summary)."""
     reading = db.get_reading(target)
     cost = db.get_cost(target)
     rates = ai_assistant.get_rates()
@@ -567,6 +609,16 @@ def digest(date: Optional[str] = Query(None)):
         "netProfit": round(revenue - operating_cost, 2),
         "status": reading.get("status", "ok"),
     }
+
+
+@app.get("/api/digest")
+def digest(date: Optional[str] = Query(None)):
+    """Factual, server-computed figures for a single day (default:
+    yesterday). Public and read-only, like the other GET endpoints — used
+    by the scheduled 'Friday' digest task so it reports real numbers
+    rather than an AI guess at arithmetic from raw JSON."""
+    target = date or (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    return _day_figures(target)
 
 
 # ---------------------------------------------------------------------------
