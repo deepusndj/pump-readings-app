@@ -269,6 +269,21 @@ function fieldPermission(field) {
   return { locked: editable && !isEditingThis, editable, ownerOnly, isEditingThis };
 }
 
+// Typed-number handling. Readings are re-rendered on every keystroke, so we keep the
+// raw text the person typed (e.g. "12." or "100.50") and show that instead of the
+// parsed number, otherwise the decimal point is wiped the moment it is typed.
+const rawText = {};
+function parseNum(raw) { return parseFloat(String(raw).trim().replace(',', '.')); }
+function fieldValueForInput(pumpId, field, v) {
+  const raw = rawText[pumpId + '|' + field];
+  if (raw !== undefined) {
+    if (raw === '' && (v === null || v === undefined)) return '';
+    const n = parseNum(raw);
+    if (!isNaN(n) && n === v) return raw;
+  }
+  return v === null || v === undefined ? '' : v;
+}
+
 function renderEntryBody() {
   const body = document.getElementById('entryBody');
   let html = '';
@@ -291,8 +306,8 @@ function renderEntryBody() {
           const readonlyAttr = (field === 'initial' && !unlocked) ? 'readonly' : '';
           return `<div class="field">
             <label>${labelText}</label>
-            <input type="text" inputmode="decimal" pattern="[0-9]*\\.?[0-9]*" ${readonlyAttr}
-              value="${v[field] === null || v[field] === undefined ? '' : v[field]}"
+            <input type="text" inputmode="decimal" pattern="[0-9]*[.,]?[0-9]*" ${readonlyAttr}
+              value="${fieldValueForInput(p.id, field, v[field])}"
               placeholder="${placeholder || ''}"
               data-role="${field}" data-pump="${p.id}">
           </div>`;
@@ -317,8 +332,8 @@ function renderEntryBody() {
         }
         return `<div class="field">
           <label>${labelText} ${ownerLockIcon}</label>
-          <input type="text" inputmode="decimal" pattern="[0-9]*\\.?[0-9]*" ${readonlyAttr} class="${inputClass}"
-            value="${v[field] === null || v[field] === undefined ? '' : v[field]}"
+          <input type="text" inputmode="decimal" pattern="[0-9]*[.,]?[0-9]*" ${readonlyAttr} class="${inputClass}"
+            value="${fieldValueForInput(p.id, field, v[field])}"
             data-role="${field}" data-pump="${p.id}">
           ${actions}
         </div>`;
@@ -415,7 +430,7 @@ function onFieldEditAction(e) {
   if (act === 'fcApply') {
     const input = document.querySelector(`input[data-pump="${pumpId}"][data-role="${field}"]`);
     const raw = input.value;
-    const newVal = raw === '' ? null : parseFloat(raw);
+    const newVal = raw === '' ? null : parseNum(raw);
     if (raw !== '' && isNaN(newVal)) { input.focus(); return; }
     const saved = state.existingDoc && state.existingDoc.pumps && state.existingDoc.pumps[pumpId];
     const oldVal = saved ? saved[field] : state.pumps[pumpId][field];
@@ -510,7 +525,8 @@ function onFieldChange(e) {
 
   if (role === 'initial' || role === 'final' || role === 'test') {
     const raw = e.target.value;
-    const parsed = raw === '' ? null : parseFloat(raw);
+    if (e.type === 'input') rawText[pumpId + '|' + role] = raw; else delete rawText[pumpId + '|' + role];
+    const parsed = raw === '' ? null : parseNum(raw);
     state.pumps[pumpId][role] = (parsed === null || isNaN(parsed)) ? (raw === '' ? null : state.pumps[pumpId][role]) : parsed;
     if (role === 'initial') state.overrides[pumpId] = true;
   } else if (role === 'confirm') {
@@ -855,7 +871,7 @@ async function onCostCellChange(e) {
   const date = input.dataset.date;
   const cat = input.dataset.cat;
   const raw = input.value.trim();
-  const amount = raw === '' ? 0 : parseFloat(raw);
+  const amount = raw === '' ? 0 : parseNum(raw);
   const msg = document.getElementById('costTableMsg');
 
   if (raw !== '' && isNaN(amount)) {
@@ -1103,7 +1119,7 @@ async function onStockCellChange(e) {
   const msg = document.getElementById('stockTableMsg');
 
   const isDip = role === 'petrolDip' || role === 'dieselDip';
-  const value = raw === '' ? (isDip ? null : 0) : parseFloat(raw);
+  const value = raw === '' ? (isDip ? null : 0) : parseNum(raw);
   if (raw !== '' && isNaN(value)) { input.value = ''; return; }
 
   input.disabled = true;
