@@ -284,7 +284,7 @@ function fieldValueForInput(pumpId, field, v) {
   return v === null || v === undefined ? '' : v;
 }
 
-function renderEntryBody() {
+function renderEntryBody(patch) {
   const body = document.getElementById('entryBody');
   let html = '';
   const isSavedDay = !!state.existingDoc;
@@ -384,13 +384,50 @@ function renderEntryBody() {
     </div>`;
   }
 
+  if (patch && patchEntryBody(body, html)) {
+    attachEntryListeners();
+    updateSaveButton(allFilled, anyUnresolvedFlag);
+    return;
+  }
   body.innerHTML = html;
   attachEntryListeners();
   updateSaveButton(allFilled, anyUnresolvedFlag);
 }
 
+// While someone is typing a reading the box they are typing in must never be replaced:
+// replacing it makes phones drop the decimal point and can reset the keyboard. So we update
+// everything around it (litres, flags, the other pumps) and leave that one input alone.
+function patchEntryBody(body, html) {
+  const active = document.activeElement;
+  if (!active || !body.contains(active) || !active.dataset || !active.dataset.pump || active.tagName !== 'INPUT') return false;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  const oldCards = body.querySelectorAll('.pump-card'), newCards = tmp.querySelectorAll('.pump-card');
+  if (!oldCards.length || oldCards.length !== newCards.length) return false;
+  for (let i = 0; i < oldCards.length; i++) {
+    const oc = oldCards[i], nc = newCards[i];
+    if (oc.dataset.pump !== nc.dataset.pump) return false;
+    if (!oc.contains(active)) { oc.replaceWith(nc); continue; }
+    oc.className = nc.className;
+    const oh = oc.querySelector('.pump-head'), nh = nc.querySelector('.pump-head');
+    if (oh && nh) oh.innerHTML = nh.innerHTML;
+    oc.querySelectorAll('.flag-note, .locked-note').forEach(n => n.remove());
+    const grid = oc.querySelector('.field-grid');
+    Array.from(nc.children).filter(n => n.classList.contains('flag-note') || n.classList.contains('locked-note')).forEach(n => grid.after(n));
+    const newInputs = nc.querySelectorAll('.field-grid input');
+    oc.querySelectorAll('.field-grid input').forEach((inp, k) => {
+      const ni = newInputs[k]; if (!ni || inp === active) return;
+      if (inp.value !== ni.value) inp.value = ni.value;
+      inp.readOnly = ni.readOnly; inp.className = ni.className;
+    });
+  }
+  return true;
+}
+
 function attachEntryListeners() {
   document.querySelectorAll('#entryBody input[data-role]').forEach(input => {
+    if (input._bound) return;
+    input._bound = true;
     input.addEventListener('input', onFieldChange);
     input.addEventListener('change', onFieldChange);
   });
@@ -524,7 +561,10 @@ function onFieldChange(e) {
   } : null;
 
   if (role === 'initial' || role === 'final' || role === 'test') {
-    const raw = e.target.value;
+    let raw = e.target.value;
+    // digits and a single decimal point only (a comma from some keyboards counts as the point)
+    let clean = raw.replace(/,/g, '.').replace(/[^0-9.]/g, ''); const dot = clean.indexOf('.'); if (dot >= 0) clean = clean.slice(0, dot + 1) + clean.slice(dot + 1).replace(/\./g, '');
+    if (clean !== raw) { const pos = (e.target.selectionStart || raw.length) - (raw.length - clean.length); e.target.value = clean; raw = clean; try { e.target.setSelectionRange(pos, pos); } catch (err) { /* ignore */ } if (focusInfo) { focusInfo.selStart = focusInfo.selEnd = pos; } }
     if (e.type === 'input') rawText[pumpId + '|' + role] = raw; else delete rawText[pumpId + '|' + role];
     const parsed = raw === '' ? null : parseNum(raw);
     state.pumps[pumpId][role] = (parsed === null || isNaN(parsed)) ? (raw === '' ? null : state.pumps[pumpId][role]) : parsed;
@@ -534,8 +574,8 @@ function onFieldChange(e) {
   } else if (role === 'unlock') {
     if (e.target.checked) state.overrides[pumpId] = true;
   }
-  renderEntryBody();
-  if (focusInfo) restoreFieldFocus(focusInfo);
+  renderEntryBody(!!focusInfo);
+  if (focusInfo && document.activeElement !== document.querySelector(`#entryBody input[data-role="${focusInfo.role}"][data-pump="${focusInfo.pumpId}"]`)) restoreFieldFocus(focusInfo);
 }
 
 function restoreFieldFocus({ role, pumpId, selStart, selEnd }) {

@@ -740,6 +740,15 @@ def owner_login(x_owner_password: Optional[str] = Header(None)):
 # Static frontend
 # ---------------------------------------------------------------------------
 
+@app.middleware("http")
+async def no_stale_frontend(request, call_next):
+    """Phones must always check for the newest page and scripts; a cached old app.js once kept a fixed bug alive on staff phones."""
+    resp = await call_next(request)
+    if not request.url.path.startswith("/api"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.isdir(FRONTEND_DIR):
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
