@@ -123,8 +123,8 @@ async def send_daily_briefing_now(force: bool = False) -> dict:
     out. Used by the scheduled loop below and the owner-triggered manual-send
     endpoint, so a one-off test push behaves like the real 4:30pm run."""
     try:
-        if not ai_assistant.GEMINI_API_KEY:
-            raise RuntimeError("GEMINI_API_KEY not set on the server")
+        if not ai_assistant.ai_configured():
+            raise RuntimeError("No AI key (GEMINI_API_KEY or NVIDIA_API_KEY) set on the server")
         result = await get_or_generate_daily_briefing(force=force)
         notify.push("Daily Briefing", result["text"])
         return {"sent": True, "cached": result["cached"], "text": result["text"], "generatedAt": result["generatedAt"]}
@@ -198,8 +198,8 @@ async def run_weekly_diagnostics() -> dict:
         lines.append("Database: FAILED")
 
     # Gemini
-    if not ai_assistant.GEMINI_API_KEY:
-        issues.append("Gemini is not configured (GEMINI_API_KEY missing)")
+    if not ai_assistant.ai_configured():
+        issues.append("AI is not configured (no GEMINI_API_KEY or NVIDIA_API_KEY)")
         lines.append("Gemini: not configured")
     else:
         try:
@@ -552,7 +552,7 @@ def _ai_result(result: dict) -> dict:
 
 @app.get("/api/ai/status")
 def ai_status():
-    return {"configured": bool(ai_assistant.GEMINI_API_KEY), "suggestions": ai_assistant.AI_SUGGESTIONS}
+    return {"configured": ai_assistant.ai_configured(), "suggestions": ai_assistant.AI_SUGGESTIONS}
 
 
 @app.post("/api/ai/briefing")
@@ -563,8 +563,8 @@ async def ai_briefing(body: AiBriefingBody, x_owner_password: Optional[str] = He
     briefing, so cache it per calendar day and only call Gemini again when
     the day has changed or the owner explicitly hits Refresh (force=True)."""
     require_owner(x_owner_password)
-    if not ai_assistant.GEMINI_API_KEY:
-        raise HTTPException(status_code=503, detail="AI Assistant isn't set up yet (no GEMINI_API_KEY on the server).")
+    if not ai_assistant.ai_configured():
+        raise HTTPException(status_code=503, detail="AI Assistant isn't set up yet (no GEMINI_API_KEY or NVIDIA_API_KEY on the server).")
 
     try:
         return await get_or_generate_daily_briefing(force=body.force)
@@ -594,8 +594,8 @@ async def ai_briefing_send_now(body: AiBriefingBody, x_owner_password: Optional[
 @app.post("/api/ai/send")
 async def ai_send(body: AiSendBody, x_owner_password: Optional[str] = Header(None)):
     require_owner(x_owner_password)
-    if not ai_assistant.GEMINI_API_KEY:
-        raise HTTPException(status_code=503, detail="AI Assistant isn't set up yet (no GEMINI_API_KEY on the server).")
+    if not ai_assistant.ai_configured():
+        raise HTTPException(status_code=503, detail="AI Assistant isn't set up yet (no GEMINI_API_KEY or NVIDIA_API_KEY on the server).")
     try:
         result = await ai_assistant.send_message(body.history, body.message)
     except ai_assistant.AiNotConfigured as e:

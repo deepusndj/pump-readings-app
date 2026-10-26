@@ -66,7 +66,7 @@ def _friendly_gemini_error(status, body):
     return f"Gemini API error {status}: {body[:300]}"
 
 
-async def gemini_generate(payload):
+async def _gemini_generate_only(payload):
     """POST a generateContent request, retrying transient failures (overload,
     rate-limit, timeouts) up to 3 times with a short backoff. If
     GEMINI_FALLBACK_MODEL is set, the last attempt uses it. Returns the parsed
@@ -97,6 +97,135 @@ async def gemini_generate(payload):
                 pass
         if delay and attempt < attempts - 1:
             await asyncio.sleep(delay)
+    raise last_error
+
+
+async def gemini_generate(payload):
+    """Gemini first; if Gemini isn't configured or fails (overloaded, rate
+    limited, daily quota used up, retired model...), fall back to NVIDIA's
+    hosted models when NVIDIA_API_KEY is set. Callers keep using the Gemini
+    request/response shape either way."""
+    gemini_error = None
+    if GEMINI_API_KEY:
+        try:
+            return await _gemini_generate_only(payload)
+        except RuntimeError as e:
+            gemini_error = e
+    if NVIDIA_API_KEY:
+        try:
+            return await nvidia_generate(payload)
+        except RuntimeError as e:
+            if gemini_error:
+                raise RuntimeError(f"{gemini_error} The NVIDIA backup also failed: {e}")
+            raise
+    raise gemini_error or RuntimeError("No AI provider is configured on the server.")
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA backup provider (OpenAI-compatible API at integrate.api.nvidia.com).
+# Translates the Gemini-format payload/response so nothing else changes.
+# ---------------------------------------------------------------------------
+
+NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "").strip()
+NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL", "openai/gpt-oss-20b").strip()
+NVIDIA_URL = os.environ.get("NVIDIA_URL", "https://integrate.api.nvidia.com/v1/chat/completions").strip()
+
+
+def ai_configured():
+    return bool(GEMINI_API_KEY or NVIDIA_API_KEY)
+
+
+def _lower_schema(s):
+    """Gemini schemas use upper-case types ("OBJECT"); OpenAI wants lower-case."""
+    if isinstance(s, dict):
+        out = {}
+        for k, v in s.items():
+            if k == "type" and isinstance(v, str):
+                out[k] = v.lower()
+            else:
+                out[k] = _lower_schema(v)
+        return out
+    if isinstance(s, list):
+        return [_lower_schema(x) for x in s]
+    return s
+
+
+def gemini_to_openai(payload):
+    messages = []
+    sys_parts = (payload.get("system_instruction") or {}).get("parts") or []
+    sys_text = "".join(p.get("text", "") for p in sys_parts).strip()
+    if sys_text:
+        messages.append({"role": "system", "content": sys_text})
+    pending_ids = []  # tool-call ids from the latest model turn, in order
+    for ti, turn in enumerate(payload.get("contents") or []):
+        parts = turn.get("parts") or []
+        if turn.get("role") == "model":
+            text = "".join(p.get("text", "") for p in parts if "text" in p)
+            calls = [p["functionCall"] for p in parts if "functionCall" in p]
+            msg = {"role": "assistant", "content": text or None}
+            if calls:
+                pending_ids = [f"call_{ti}_{k}" for k in range(len(calls))]
+                msg["tool_calls"] = [{"id": pending_ids[k], "type": "function",
+                                      "function": {"name": c["name"], "arguments": json.dumps(c.get("args") or {})}}
+                                     for k, c in enumerate(calls)]
+            messages.append(msg)
+            continue
+        responses = [p["functionResponse"] for p in parts if "functionResponse" in p]
+        for k, r in enumerate(responses):
+            call_id = pending_ids[k] if k < len(pending_ids) else f"call_{ti}_{k}"
+            messages.append({"role": "tool", "tool_call_id": call_id,
+                             "content": json.dumps(r.get("response", {}), default=str)[:12000]})
+        text = "".join(p.get("text", "") for p in parts if "text" in p)
+        if text:
+            messages.append({"role": "user", "content": text})
+    body = {"model": NVIDIA_MODEL, "messages": messages, "max_tokens": 2048, "temperature": 0.3}
+    tools = []
+    for group in payload.get("tools") or []:
+        for fd in group.get("functionDeclarations") or group.get("function_declarations") or []:
+            tools.append({"type": "function", "function": {
+                "name": fd["name"], "description": fd.get("description", ""),
+                "parameters": _lower_schema(fd.get("parameters") or {"type": "OBJECT", "properties": {}})}})
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    return body
+
+
+def openai_to_gemini(data):
+    msg = ((data.get("choices") or [{}])[0] or {}).get("message") or {}
+    parts = []
+    if (msg.get("content") or "").strip():
+        parts.append({"text": msg["content"]})
+    for c in msg.get("tool_calls") or []:
+        fn = c.get("function") or {}
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except ValueError:
+            args = {}
+        parts.append({"functionCall": {"name": fn.get("name"), "args": args if isinstance(args, dict) else {}}})
+    if not parts:
+        return {"candidates": []}
+    return {"candidates": [{"content": {"role": "model", "parts": parts}}]}
+
+
+async def nvidia_generate(payload):
+    body = gemini_to_openai(payload)
+    headers = {"Authorization": f"Bearer {NVIDIA_API_KEY}", "Content-Type": "application/json"}
+    last_error = None
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(NVIDIA_URL, headers=headers, json=body)
+        except (httpx.TimeoutException, httpx.TransportError):
+            last_error = RuntimeError("NVIDIA didn't respond in time.")
+        else:
+            if resp.status_code == 200:
+                return openai_to_gemini(resp.json())
+            last_error = RuntimeError(f"NVIDIA API error {resp.status_code}: {resp.text[:200]}")
+            if resp.status_code not in _RETRYABLE_STATUS:
+                raise last_error
+        if attempt == 0:
+            await asyncio.sleep(2)
     raise last_error
 
 PUMPS = [
@@ -419,8 +548,8 @@ def briefing_prompt(ctx):
 
 
 async def generate_briefing():
-    if not GEMINI_API_KEY:
-        raise AiNotConfigured("GEMINI_API_KEY is not set on the server.")
+    if not (GEMINI_API_KEY or NVIDIA_API_KEY):
+        raise AiNotConfigured("No AI key is set on the server (GEMINI_API_KEY or NVIDIA_API_KEY).")
     ctx = build_briefing_context()
     payload = {"contents": [{"role": "user", "parts": [{"text": briefing_prompt(ctx)}]}]}
     data = await gemini_generate(payload)
@@ -794,8 +923,8 @@ async def send_message(contents, message):
 
 
 async def call_gemini(contents):
-    if not GEMINI_API_KEY:
-        raise AiNotConfigured("GEMINI_API_KEY is not set on the server.")
+    if not (GEMINI_API_KEY or NVIDIA_API_KEY):
+        raise AiNotConfigured("No AI key is set on the server (GEMINI_API_KEY or NVIDIA_API_KEY).")
     payload = {
         "system_instruction": {"parts": [{"text": system_instruction()}]},
         "contents": contents,
