@@ -1299,6 +1299,113 @@ async function checkOwnerPassword(onUnlock) {
 }
 
 // ---------------------------------------------------------------------------
+// SALES tab (owner only) — month spreadsheet of daily petrol / diesel sales
+// ---------------------------------------------------------------------------
+
+let salesTableState = { month: monthKey(todayStr()) };
+
+async function renderSalesTab() {
+  const body = document.getElementById('salesBody');
+  body.innerHTML = '<div class="loading">Loading sales&hellip;</div>';
+  let readings;
+  try {
+    const { from, to } = monthDateRange(salesTableState.month);
+    readings = await api('GET', `/readings?from=${from}&to=${to}&limit=100`);
+  } catch (e) {
+    body.innerHTML = '<div class="empty-state">Could not load sales — try again.</div>';
+    return;
+  }
+  drawSalesTable(readings || []);
+}
+
+function salesCsv(rows, monKey) {
+  const head = ['Date', 'Petrol (L)', 'Diesel (L)', 'Total (L)', 'Petrol (Rs)', 'Diesel (Rs)', 'Total (Rs)'];
+  const lines = [head.join(',')].concat(rows.filter(r => r.entered).map(r =>
+    [r.date, r.pL, r.dL, r.pL + r.dL, r.pR.toFixed(2), r.dR.toFixed(2), (r.pR + r.dR).toFixed(2)].join(',')));
+  return lines.join('\n');
+}
+
+function drawSalesTable(readings) {
+  const body = document.getElementById('salesBody');
+  const monKey = salesTableState.month;
+  const [y, m] = monKey.split('-').map(Number);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const todayKey = todayStr();
+  const byDate = {};
+  readings.forEach(r => { byDate[r.date] = r; });
+
+  const rows = [];
+  const tot = { pL: 0, dL: 0, pR: 0, dR: 0, days: 0 };
+  let rowsHtml = '';
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dateStr = `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    if (dateStr > todayKey) break;
+    const r = byDate[dateStr];
+    const dow = new Date(y, m - 1, day).toLocaleDateString(undefined, { weekday: 'short' });
+    const label = `<td class="cost-row-label">${day} <span style="color:var(--text-faint);font-weight:400;">${dow}</span></td>`;
+    if (!r) {
+      rows.push({ date: dateStr, entered: false });
+      rowsHtml += `<tr class="${dateStr === todayKey ? 'today-row' : ''}">${label}<td colspan="6" class="sales-missing">no reading</td></tr>`;
+      continue;
+    }
+    const rate = rateForDate(dateStr, null);
+    const pL = (r.totals && r.totals.petrol) || 0, dL = (r.totals && r.totals.diesel) || 0;
+    const pR = pL * rate.petrol, dR = dL * rate.diesel;
+    tot.pL += pL; tot.dL += dL; tot.pR += pR; tot.dR += dR; tot.days++;
+    rows.push({ date: dateStr, entered: true, pL, dL, pR, dR });
+    rowsHtml += `<tr class="${dateStr === todayKey ? 'today-row' : ''}">${label}
+      <td>${fmt(pL)}</td><td>${fmt(dL)}</td><td class="cost-row-total">${fmt(pL + dL)}</td>
+      <td>₹${fmt(Math.round(pR))}</td><td>₹${fmt(Math.round(dR))}</td><td class="cost-row-total">₹${fmt(Math.round(pR + dR))}</td></tr>`;
+  }
+  const avg = (v) => tot.days ? fmt(Math.round(v / tot.days)) : '–';
+  const avgL = (v) => tot.days ? fmt(Math.round(v / tot.days * 10) / 10) : '–';
+  const isCurrentOrFutureMonth = monKey >= monthKey(todayKey);
+
+  body.innerHTML = `
+    <div class="month-nav">
+      <button id="salesPrevMonth">‹</button>
+      <div class="m-label">${monthLabel(monKey)}</div>
+      <button id="salesNextMonth" ${isCurrentOrFutureMonth ? 'disabled' : ''}>›</button>
+    </div>
+    <div class="cost-table-hint">Litres sold each day from the meter readings, and revenue at the selling rate in force that day. Read-only — change a day on the Readings tab.</div>
+    <div class="stock-table-wrap">
+      <table class="stock-table sales-table">
+        <thead><tr>
+          <th class="cost-row-label">Day</th>
+          <th class="col-petrol">Petrol (L)</th>
+          <th class="col-diesel">Diesel (L)</th>
+          <th>Total (L)</th>
+          <th class="col-petrol">Petrol ₹</th>
+          <th class="col-diesel">Diesel ₹</th>
+          <th>Total ₹</th>
+        </tr></thead>
+        <tbody>${rowsHtml}</tbody>
+        <tfoot>
+          <tr><td class="cost-row-label">Total</td><td>${fmt(tot.pL)}</td><td>${fmt(tot.dL)}</td><td>${fmt(tot.pL + tot.dL)}</td><td>₹${fmt(Math.round(tot.pR))}</td><td>₹${fmt(Math.round(tot.dR))}</td><td>₹${fmt(Math.round(tot.pR + tot.dR))}</td></tr>
+          <tr class="sales-avg"><td class="cost-row-label">Daily avg</td><td>${avgL(tot.pL)}</td><td>${avgL(tot.dL)}</td><td>${avgL(tot.pL + tot.dL)}</td><td>₹${avg(tot.pR)}</td><td>₹${avg(tot.dR)}</td><td>₹${avg(tot.pR + tot.dR)}</td></tr>
+        </tfoot>
+      </table>
+    </div>
+    <div style="margin-top:12px;"><button class="switch-role-btn" id="salesCsvBtn">Download CSV</button></div>`;
+
+  document.getElementById('salesPrevMonth').addEventListener('click', () => {
+    salesTableState.month = shiftMonth(salesTableState.month, -1);
+    renderSalesTab();
+  });
+  const nextBtn = document.getElementById('salesNextMonth');
+  if (nextBtn && !nextBtn.disabled) nextBtn.addEventListener('click', () => {
+    salesTableState.month = shiftMonth(salesTableState.month, 1);
+    renderSalesTab();
+  });
+  document.getElementById('salesCsvBtn').addEventListener('click', () => {
+    const blob = new Blob([salesCsv(rows, monKey)], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = `sales-${monKey}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // ANALYSIS tab (owner only) — monthly profit/revenue summary + rates/targets
 // ---------------------------------------------------------------------------
 
@@ -2122,11 +2229,13 @@ function switchTab(tab) {
   document.getElementById('view-entry').classList.toggle('hidden', tab !== 'entry');
   document.getElementById('view-cost').classList.toggle('hidden', tab !== 'cost');
   document.getElementById('view-stock').classList.toggle('hidden', tab !== 'stock');
+  document.getElementById('view-sales').classList.toggle('hidden', tab !== 'sales');
   document.getElementById('view-analysis').classList.toggle('hidden', tab !== 'analysis');
   document.getElementById('view-ai').classList.toggle('hidden', tab !== 'ai');
   document.getElementById('savebar').classList.toggle('hidden', tab !== 'entry');
   if (tab === 'cost') { appRole === 'owner' ? renderOwnerCostTab() : renderCostTab(); }
   if (tab === 'stock') { appRole === 'owner' ? renderOwnerStockTab() : renderStockTab(); }
+  if (tab === 'sales') renderSalesTab();
   if (tab === 'analysis') renderAnalysisTab();
   if (tab === 'ai') renderAiTab();
   if (tab === 'summary') renderSummaryTab();
@@ -2161,7 +2270,7 @@ function enterApp(role) {
     <button class="tab" data-tab="cost">Cost</button>
     <button class="tab" data-tab="stock">Stock</button>`;
   tabBar.innerHTML = role === 'owner'
-    ? `<button class="tab" data-tab="summary">Summary</button>${coreTabs}<button class="tab" data-tab="analysis">Analysis</button><button class="tab" data-tab="ai">AI Assistant</button>`
+    ? `<button class="tab" data-tab="summary">Summary</button>${coreTabs}<button class="tab" data-tab="sales">Sales</button><button class="tab" data-tab="analysis">Analysis</button><button class="tab" data-tab="ai">AI Assistant</button>`
     : coreTabs;
   bindTabClicks();
   switchTab(role === 'owner' ? 'summary' : 'entry');
