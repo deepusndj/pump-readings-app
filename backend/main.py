@@ -749,7 +749,7 @@ async def no_stale_frontend(request, call_next):
     return resp
 
 
-# Frontend build: 2026-11-10b (reading warnings). Touch this line when only
+# Frontend build: 2026-11-10c (app manifest for home-screen install). Touch this line when only
 # frontend files change, so Render (rootDir: backend) still redeploys.
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.isdir(FRONTEND_DIR):
