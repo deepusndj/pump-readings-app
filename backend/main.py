@@ -749,6 +749,8 @@ async def no_stale_frontend(request, call_next):
     return resp
 
 
+# Frontend build: 2026-11-10 (owner Sales tab). Touch this line when only
+# frontend files change, so Render (rootDir: backend) still redeploys.
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.isdir(FRONTEND_DIR):
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
