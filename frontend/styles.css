@@ -561,3 +561,6 @@ main { padding-top: 18px; }
 }
 .ai-confirm-all-text { font-size: 12.5px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px; }
 .ai-confirm-all-bar .ai-confirm-actions { display: flex; gap: 8px; }
+
+.sales-table td.sales-missing { color: var(--text-faint); font-style: italic; text-align: left; padding-left: 14px; }
+.sales-table tfoot tr.sales-avg td { font-weight: 400; color: var(--text-dim); border-top: none; }
