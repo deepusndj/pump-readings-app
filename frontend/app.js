@@ -575,7 +575,34 @@ function onFieldChange(e) {
     if (e.target.checked) state.overrides[pumpId] = true;
   }
   renderEntryBody(!!focusInfo);
+  if (e.type === 'change' && (role === 'initial' || role === 'final' || role === 'test')) alertIfNegative(pumpId);
   if (focusInfo && document.activeElement !== document.querySelector(`#entryBody input[data-role="${focusInfo.role}"][data-pump="${focusInfo.pumpId}"]`)) restoreFieldFocus(focusInfo);
+}
+
+// Readings sanity checks: a pump that sold more than this in one day is not
+// a normal day, so saving asks for a confirmation first.
+const BIG_DIFF_LITRES = 2000;
+const negativeAlerted = {};
+
+function pumpLabel(pumpId) { const p = PUMPS.find(x => x.id === pumpId); return p ? p.label : pumpId; }
+
+// Pops an alert as soon as a pump's reading works out negative (once per set of values).
+function alertIfNegative(pumpId) {
+  const v = state.pumps[pumpId];
+  const { litres, negative } = computeLitres(pumpId);
+  if (litres === null || litres >= 0) return;
+  if (negative && state.confirmedFlags[pumpId]) return;
+  const key = [pumpId, v.initial, v.final, v.test || 0].join('|');
+  if (negativeAlerted[key]) return;
+  negativeAlerted[key] = true;
+  openConfirmModal({
+    title: 'Negative reading — ' + pumpLabel(pumpId),
+    body: `Initial <b>${fmt(v.initial)}</b>, final <b>${fmt(v.final)}</b>${v.test ? `, test <b>${fmt(v.test)} L</b>` : ''} gives <b>${fmt(litres)} L</b>. Litres sold cannot be below zero.<br><br>` +
+      (negative ? 'Check the final reading for a typo. If the meter really was reset or replaced, tick the reset box on that pump.' : 'The test litres are more than the pump sold. Check the test and final readings.'),
+    confirmLabel: 'OK, I will check',
+    neutral: true,
+    onConfirm: async () => {},
+  });
 }
 
 function restoreFieldFocus({ role, pumpId, selStart, selEnd }) {
@@ -617,9 +644,32 @@ function updateStatusChip() {
   }
 }
 
-async function saveReadings() {
+async function saveReadings(confirmedBig) {
   const btn = document.getElementById('saveBtn');
   const msg = document.getElementById('saveMsg');
+
+  // Never save a negative that has not been confirmed as a meter reset.
+  const negPumps = PUMPS.filter(p => { const r = computeLitres(p.id); return r.litres !== null && r.litres < 0 && !(r.negative && state.confirmedFlags[p.id]); });
+  if (negPumps.length) {
+    openConfirmModal({
+      title: 'Negative reading — not saved',
+      body: negPumps.map(p => `<b>${p.label}</b>: ${fmt(computeLitres(p.id).litres)} L`).join('<br>') + '<br><br>Litres sold cannot be below zero. Fix the reading(s) and save again.',
+      confirmLabel: 'OK, I will check', neutral: true, onConfirm: async () => {},
+    });
+    return;
+  }
+  // An unusually large difference needs an explicit yes before it is saved.
+  const bigPumps = PUMPS.filter(p => { const r = computeLitres(p.id); return r.litres !== null && r.litres > BIG_DIFF_LITRES; });
+  if (bigPumps.length && confirmedBig !== true) {
+    openConfirmModal({
+      title: 'Unusually large reading',
+      body: bigPumps.map(p => { const v = state.pumps[p.id]; return `<b>${p.label}</b>: ${fmt(v.initial)} → ${fmt(v.final)} = <b>${fmt(computeLitres(p.id).litres)} L</b>`; }).join('<br>') +
+        `<br><br>That is more than ${fmt(BIG_DIFF_LITRES)} L on one pump in a day, which is not normal. Is this difference correct?`,
+      confirmLabel: 'Yes, it is correct — save',
+      onConfirm: async () => { await saveReadings(true); },
+    });
+    return;
+  }
   btn.disabled = true;
   msg.textContent = 'Saving…';
   msg.className = 'save-msg';
@@ -638,6 +688,7 @@ async function saveReadings() {
       litres: isReset ? 0 : litres,
       confirmedReset: !!isReset,
       overridden: !!state.overrides[p.id],
+      confirmedHigh: !isReset && litres > BIG_DIFF_LITRES,
     };
   });
 
