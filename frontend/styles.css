@@ -564,3 +564,6 @@ main { padding-top: 18px; }
 
 .sales-table td.sales-missing { color: var(--text-faint); font-style: italic; text-align: left; padding-left: 14px; }
 .sales-table tfoot tr.sales-avg td { font-weight: 400; color: var(--text-dim); border-top: none; }
+
+.remember-row { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text-dim); margin: 4px 0 14px; }
+.remember-row input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--petrol); }

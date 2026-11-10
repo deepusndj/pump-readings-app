@@ -22,11 +22,13 @@ const FUEL_TANKS = [{ id: 'petrol', label: 'Petrol tank', fuel: 'petrol' }, { id
 
 let appRole = null; // 'employee' | 'owner'
 
-// Owner password is kept in memory only (never persisted to localStorage or
-// sessionStorage) so it's needed to authenticate API calls during the
-// current session, but is always gone on a fresh page load/app reopen —
-// the owner password prompt is asked again every time, by design.
+// Owner password is kept in memory for the current session. It is only saved
+// on this phone when the owner ticks "Remember me" on the password screen.
 let ownerPasswordMem = null;
+const OWNER_PW_KEY = 'pumpReadings.ownerPw';
+function savedOwnerPw() { try { return localStorage.getItem(OWNER_PW_KEY); } catch (e) { return null; } }
+function saveOwnerPw(pw) { try { localStorage.setItem(OWNER_PW_KEY, pw); } catch (e) { /* private mode: just don't remember */ } }
+function forgetOwnerPw() { try { localStorage.removeItem(OWNER_PW_KEY); } catch (e) { /* ignore */ } }
 
 let state = {
   date: todayStr(),
@@ -1320,6 +1322,7 @@ function renderOwnerLock(body, onUnlock) {
   body.innerHTML = `
     <div class="simple-form" style="max-width:320px;margin:40px auto;">
       <div class="field"><label>Owner password</label><input type="password" id="ownerPwInput" placeholder="Enter password" autocomplete="off"></div>
+      <label class="remember-row"><input type="checkbox" id="ownerRemember" ${savedOwnerPw() ? 'checked' : ''}> Remember me on this phone</label>
       <button class="submit-btn" id="ownerPwSubmit">Unlock</button>
       <div class="form-msg" id="ownerPwMsg"></div>
     </div>`;
@@ -1339,6 +1342,8 @@ async function checkOwnerPassword(onUnlock) {
     const res = await fetch('/api/owner/login', { method: 'POST', headers: { 'X-Owner-Password': pw } });
     if (res.ok) {
       ownerPasswordMem = pw;
+      const remember = document.getElementById('ownerRemember');
+      if (remember && remember.checked) saveOwnerPw(pw); else forgetOwnerPw();
       onUnlock();
     } else {
       msg.textContent = 'Incorrect password'; msg.className = 'form-msg err';
@@ -2304,8 +2309,17 @@ function renderRoleScreen() {
   document.getElementById('roleScreen').classList.remove('hidden');
   document.getElementById('roleOwnerGate').innerHTML = '';
   document.getElementById('roleEmployeeBtn').onclick = () => enterApp('employee');
-  document.getElementById('roleOwnerBtn').onclick = () => {
+  document.getElementById('roleOwnerBtn').onclick = async () => {
     if (ownerUnlocked()) { enterApp('owner'); return; }
+    const saved = savedOwnerPw();
+    if (saved) {
+      // Remembered on this phone: check it still works, then go straight in.
+      try {
+        const res = await fetch('/api/owner/login', { method: 'POST', headers: { 'X-Owner-Password': saved } });
+        if (res.ok) { ownerPasswordMem = saved; enterApp('owner'); return; }
+      } catch (e) { /* offline: fall through to the password screen */ }
+      forgetOwnerPw();
+    }
     renderOwnerLock(document.getElementById('roleOwnerGate'), () => enterApp('owner'));
   };
 }
