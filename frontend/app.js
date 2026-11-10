@@ -170,6 +170,7 @@ async function loadPrevAndCurrent(dateStr) {
 // ---------------------------------------------------------------------------
 
 const MISSING_DAYS_LOOKBACK = 14;
+let missingDaysExpanded = false;
 
 function addDaysStr(dateStr, delta) {
   const [y, m, d] = dateStr.split('-').map(Number);
@@ -201,15 +202,25 @@ async function renderMissingDaysNote() {
     if (!missing.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
 
     missing.reverse(); // most recent first
-    const shown = missing.slice(0, 6);
+    const shown = missingDaysExpanded ? missing : missing.slice(0, 6);
     const rest = missing.length - shown.length;
     el.innerHTML = `
       <div class="missing-note">
         <span class="missing-note-label">${missing.length === 1 ? 'Missing day' : 'Missing days'}:</span>
-        ${shown.map(d => `<span class="missing-chip">${shortDay(d)}</span>`).join('')}
-        ${rest > 0 ? `<span class="missing-chip more">+${rest} more</span>` : ''}
+        ${shown.map(d => `<button type="button" class="missing-chip missing-day${d === state.date ? ' current' : ''}" data-date="${d}">${shortDay(d)}</button>`).join('')}
+        ${rest > 0 ? `<button type="button" class="missing-chip more" id="missingMoreBtn">+${rest} more</button>` : ''}
+        ${missingDaysExpanded && missing.length > 6 ? '<button type="button" class="missing-chip more" id="missingLessBtn">show less</button>' : ''}
       </div>`;
     el.classList.remove('hidden');
+    el.querySelectorAll('.missing-day').forEach(btn => btn.addEventListener('click', () => {
+      document.getElementById('dateInput').value = btn.dataset.date;
+      renderEntryForDate(btn.dataset.date);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }));
+    const moreBtn = document.getElementById('missingMoreBtn');
+    if (moreBtn) moreBtn.addEventListener('click', () => { missingDaysExpanded = true; renderMissingDaysNote(); });
+    const lessBtn = document.getElementById('missingLessBtn');
+    if (lessBtn) lessBtn.addEventListener('click', () => { missingDaysExpanded = false; renderMissingDaysNote(); });
   } catch (e) {
     el.classList.add('hidden');
     el.innerHTML = '';
