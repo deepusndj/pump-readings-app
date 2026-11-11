@@ -435,6 +435,7 @@ def sum_range(start, end):
 def summarize_date_window(dates, readings_by_date, cost_by_date, rates):
     margin_p = rates.get("marginPetrol", 2.75)
     margin_d = rates.get("marginDiesel", 2.22)
+    today = today_str()
     petrol_l = diesel_l = revenue = cost = 0.0
     days_with_entry = 0
     missing_dates = []
@@ -442,7 +443,10 @@ def summarize_date_window(dates, readings_by_date, cost_by_date, rates):
     for d in dates:
         r = readings_by_date.get(d)
         if not r:
-            missing_dates.append(d)
+            # Today's reading isn't due yet — staff log the previous day's
+            # numbers, so an empty "today" is expected, not a missing entry.
+            if d != today:
+                missing_dates.append(d)
             continue
         days_with_entry += 1
         totals = r.get("totals") or {}
